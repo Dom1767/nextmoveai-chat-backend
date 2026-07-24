@@ -77,11 +77,11 @@ export default async function handler(req, res) {
 
     // Which persona name to use – each page on the site sends its
     // own name (Dalo on the homepage and free preview, Veto on the
-    // unlimited page). Defaults to Dalo if not sent.
+    // unlimited page). Defaults to Veto if not sent.
     const botName =
       typeof req.body.botName === "string" && req.body.botName.trim()
         ? req.body.botName.trim().slice(0, 30)
-        : "Dalo";
+        : "Veto";
 
     const systemPrompt =
       "You are " + botName + ", the friendly, encouraging AI coach " +
