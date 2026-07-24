@@ -76,7 +76,7 @@ export default async function handler(req, res) {
       "recommend the single most relevant one for what they asked.";
 
     // Which persona name to use – each page on the site sends its
-    // own name (Dalo on the homepage and free preview, Veto on the
+    // own name (Veto on the homepage and free preview, Veto on the
     // unlimited page). Defaults to Veto if not sent.
     const botName =
       typeof req.body.botName === "string" && req.body.botName.trim()
