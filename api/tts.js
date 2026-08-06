@@ -15,17 +15,14 @@
 //    your Anthropic key, since this uses OpenAI's TTS model.)
 // 3. Redeploy after adding the variable.
 //
-// COST: OpenAI TTS is billed per character of input text, at a
-// low per-character rate — at NextMoveAI's current chat volume
-// this should run to a few dollars a month at most. Check
-// platform.openai.com/usage to monitor actual spend.
+// COST: Uses gpt-4o-mini-tts, billed per token rather than per
+// character ($0.60/1M input tokens + $12/1M audio output tokens).
+// At NextMoveAI's current chat volume this should still run to a
+// few dollars a month at most. Check platform.openai.com/usage
+// to monitor actual spend.
 // =========================================================
 
 export default async function handler(req, res) {
-  // CORS — mirror whatever your existing api/chat.js does. If
-  // chat.js sets specific allowed origins via an ALLOWED_ORIGIN
-  // env var, copy that same pattern here instead of the wildcard
-  // below.
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -64,9 +61,10 @@ export default async function handler(req, res) {
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        model: "tts-1",
+        model: "gpt-4o-mini-tts",
         voice: "nova",
         input: safeText,
+        instructions: "Speak as a warm, friendly Caribbean woman — natural, welcoming, and easy to understand, like a trusted friend giving financial advice.",
         response_format: "mp3"
       })
     });
