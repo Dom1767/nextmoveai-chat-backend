@@ -7,6 +7,15 @@
 // that visitor has saved so far so the page can repopulate.
 //
 // Requires env vars: SUPABASE_URL, SUPABASE_SERVICE_KEY
+//
+// UPDATED: added CORS headers and an OPTIONS handler. The browser
+// sends an automatic "preflight" OPTIONS request before the real
+// POST for any cross-origin request — this file previously had no
+// handler for that, so every OPTIONS request hit the
+// "Method not allowed" branch and returned 405, which made the
+// browser abort the real POST before it was ever sent. That's why
+// verification always failed with a generic "Something went wrong"
+// on the frontend, even with the correct code.
 // =========================================================
 
 import { createClient } from "@supabase/supabase-js";
@@ -18,6 +27,15 @@ const supabase = createClient(
 );
 
 export default async function handler(req, res) {
+  const allowedOrigin = process.env.ALLOWED_ORIGIN || "*";
+  res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
   if (req.method !== "POST") {
     return res.status(405).json({ success: false, error: "Method not allowed" });
   }
