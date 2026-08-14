@@ -12,7 +12,7 @@
 //   PRO_TOKEN_SECRET — a long random string, kept secret. Never
 //   expose this to the client or commit it to the repo.
 
-const crypto = require("crypto");
+import crypto from "node:crypto";
 
 const TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
@@ -30,7 +30,7 @@ function sign(payloadB64, secret) {
   );
 }
 
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
   // Mirror whatever CORS setup your existing api/chat.js uses —
   // this must allow requests from your Squarespace domain.
   res.setHeader("Access-Control-Allow-Origin", "https://www.nextmoveai.ai");
@@ -47,27 +47,27 @@ module.exports = async (req, res) => {
     return;
   }
 
-  var secret = process.env.PRO_TOKEN_SECRET;
+  const secret = process.env.PRO_TOKEN_SECRET;
   if (!secret) {
     res.status(500).json({ error: "Server misconfigured" });
     return;
   }
 
-  var email = req.body && req.body.email;
+  const email = req.body && req.body.email;
   if (!email || typeof email !== "string") {
     res.status(400).json({ error: "Missing email" });
     return;
   }
 
-  var payload = {
+  const payload = {
     email: email.toLowerCase().trim(),
     iat: Date.now(),
     exp: Date.now() + TOKEN_TTL_MS
   };
 
-  var payloadB64 = base64url(JSON.stringify(payload));
-  var signature = sign(payloadB64, secret);
-  var token = payloadB64 + "." + signature;
+  const payloadB64 = base64url(JSON.stringify(payload));
+  const signature = sign(payloadB64, secret);
+  const token = payloadB64 + "." + signature;
 
   res.status(200).json({ token: token, expiresAt: payload.exp });
-};
+}
