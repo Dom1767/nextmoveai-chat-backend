@@ -2,15 +2,21 @@
 // NextMoveAI – AI Financial Coach chat endpoint
 // Deploy this on Vercel as: api/chat.js
 //
-// UPDATED: now reads `userProfile` from the request body (the
-// frontend has been sending this all along — hasScore, hasPlan,
-// hasSpendingData, hasGrowData, hasInvestData, scoreValue, etc. —
-// but this endpoint previously ignored it entirely). That data is
-// now summarized into the system prompt so Veto can proactively
-// suggest a specific unfinished tool with a real link, but ONLY
-// when it's genuinely relevant to what the person asked — not on
-// every single reply.
+// UPDATED: now verifies the PRO token sent from the frontend as
+// `nmxProToken` (minted by /pro-access via api/issue-pro-token.js)
+// instead of trusting any client-sent "isPro" flag. `isPro` below
+// is the real, server-verified value.
+//
+// IMPORTANT CAVEAT: this file does not currently enforce a free-
+// question limit at all — that has only ever lived client-side in
+// the homepage widget's JS, which anyone calling this endpoint
+// directly could already bypass regardless of PRO status. `isPro`
+// is wired in and ready to use, but actually rate-limiting requests
+// server-side (e.g. tracking a per-person question count in
+// Supabase) is separate follow-up work, not part of this patch.
 // ============================================================
+
+const { verifyProToken } = require("./_verifyProToken");
 
 export default async function handler(req, res) {
 
@@ -43,6 +49,12 @@ export default async function handler(req, res) {
     }
 
     const trimmed = messages.slice(-12);
+
+    // Real, server-verified PRO status — replaces trusting any
+    // client-sent flag. proEmail is the verified member's email if
+    // the token is valid and not expired, or null otherwise.
+    const proEmail = verifyProToken(req.body.nmxProToken);
+    const isPro = !!proEmail;
 
     const siteMap =
       "SITE MAP – pages on nextmoveai.ai you can direct people to:\n" +
@@ -235,7 +247,12 @@ export default async function handler(req, res) {
       .join("")
       .trim();
 
-    return res.status(200).json({ reply: reply || "Sorry, I didn't catch that — could you rephrase?" });
+    // isPro is now included in the response so the frontend can, if
+    // it wants, trust the server's verdict over its own local check.
+    return res.status(200).json({
+      reply: reply || "Sorry, I didn't catch that — could you rephrase?",
+      isPro: isPro
+    });
 
   } catch (err) {
     console.error("Chat handler error:", err);
