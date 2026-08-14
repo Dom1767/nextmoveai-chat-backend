@@ -1,83 +1,339 @@
-// =========================================================
-// GET  /api/sync           (Authorization: Bearer <token>)
-//   → returns everything the visitor has saved across all tools
+// ============================================================
+// NextMoveAI – AI Financial Coach chat endpoint
+// Deploy this on Vercel as: api/chat.js
 //
-// POST /api/sync           (Authorization: Bearer <token>)
-//   Body: { "tool": "invest", "data": { ...tool's state... } }
-//   → saves/overwrites just that tool's branch, leaves the rest alone
-// =========================================================
+// UPDATED (this version):
+// 1. Verifies the PRO token sent from the frontend as `nmxProToken`
+//    (minted by /pro-access via api/issue-pro-token.js) instead of
+//    trusting any client-sent "isPro" flag.
+// 2. Enforces the free-question limit SERVER-SIDE for the first
+//    time, using a Supabase table (chat_usage) keyed by a stable
+//    anonymous device ID the frontend now sends as `nmxDeviceId`.
+//    Previously this limit only existed in the widget's own JS,
+//    which anyone calling this endpoint directly could bypass —
+//    including burning your Anthropic API budget for free. Blocked
+//    requests now never reach the Anthropic call at all.
+//
+// Requires (in addition to ANTHROPIC_API_KEY, already set):
+//   SUPABASE_URL, SUPABASE_SERVICE_KEY — already set in this project
+//   PRO_TOKEN_SECRET — already set, used by _verifyProToken
+//
+// Requires the "chat_usage" table — see supabase-chat-usage-table.sql
+// Requires the @supabase/supabase-js package as a dependency.
+// ============================================================
 
+import { verifyProToken } from "./_verifyProToken.js";
 import { createClient } from "@supabase/supabase-js";
+
+const FREE_QUESTION_LIMIT = 4;
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY
 );
 
-async function getEmailForToken(token) {
-  if (!token) return null;
+// Looks up how many free questions this device has already used.
+// Fails OPEN (allows the request) if Supabase itself has a problem —
+// a DB hiccup should never be the reason a legitimate free user gets
+// blocked, and worst case is a handful of extra free questions.
+async function getUsage(deviceId) {
+  if (!deviceId) return { count: 0 };
+
   const { data, error } = await supabase
-    .from("nma_sync_sessions")
-    .select("email, expires_at")
-    .eq("token", token)
-    .single();
-  if (error || !data) return null;
-  if (new Date(data.expires_at) < new Date()) return null;
-  return data.email;
+    .from("chat_usage")
+    .select("question_count")
+    .eq("device_id", deviceId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("Supabase usage lookup error:", error);
+    return { count: 0 };
+  }
+
+  return { count: data ? data.question_count : 0 };
+}
+
+async function incrementUsage(deviceId, currentCount) {
+  if (!deviceId) return;
+
+  const { error } = await supabase
+    .from("chat_usage")
+    .upsert(
+      {
+        device_id: deviceId,
+        question_count: currentCount + 1,
+        last_seen: new Date().toISOString()
+      },
+      { onConflict: "device_id" }
+    );
+
+  if (error) {
+    console.error("Supabase usage increment error:", error);
+  }
 }
 
 export default async function handler(req, res) {
-  const authHeader = req.headers.authorization || "";
-  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
-  const email = await getEmailForToken(token);
 
-  if (!email) {
-    return res.status(401).json({ success: false, error: "Invalid or expired session" });
+  const allowedOrigin = process.env.ALLOWED_ORIGIN || "*";
+
+  res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
   }
 
-  if (req.method === "GET") {
-    const { data, error } = await supabase
-      .from("nma_users")
-      .select("tools, updated_at")
-      .eq("email", email)
-      .single();
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
 
-    if (error) {
-      return res.status(500).json({ success: false, error: "Could not load data" });
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+
+  if (!apiKey) {
+    return res.status(500).json({ error: "Server not configured" });
+  }
+
+  try {
+
+    const { messages } = req.body || {};
+
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: "messages array required" });
     }
-    return res.status(200).json({
-      success: true,
-      found: true,
-      tools: data.tools || {},
-      updatedAt: data.updated_at
+
+    const trimmed = messages.slice(-12);
+
+    // Real, server-verified PRO status — replaces trusting any
+    // client-sent flag. proEmail is the verified member's email if
+    // the token is valid and not expired, or null otherwise.
+    const proEmail = verifyProToken(req.body.nmxProToken);
+    const isPro = !!proEmail;
+
+    // Stable anonymous ID the frontend generates once and stores in
+    // localStorage, sent with every request. Used only to enforce
+    // the free-question limit — never tied to any personal data.
+    const deviceId =
+      typeof req.body.nmxDeviceId === "string"
+        ? req.body.nmxDeviceId.slice(0, 100)
+        : null;
+
+    let usage = { count: 0 };
+
+    if (!isPro) {
+      usage = await getUsage(deviceId);
+      if (usage.count >= FREE_QUESTION_LIMIT) {
+        return res.status(403).json({
+          error: "free_limit_reached",
+          message: "You've used your free questions. Upgrade to Veto PRO for unlimited access."
+        });
+      }
+    }
+
+    const siteMap =
+      "SITE MAP – pages on nextmoveai.ai you can direct people to:\n" +
+      "- Home (/) – the main landing page: intro to NextMoveAI, " +
+      "overview of the Review → Spend → Plan → Grow journey.\n" +
+      "- Score (/check-your-score) – the Financial Health Review. " +
+      "Users enter their numbers and get a live 0-100 Financial " +
+      "Health Score with a breakdown. This is the best starting " +
+      "point for anyone who hasn't used the site yet.\n" +
+      "- Spending (/spending) – Paycheck GPS. Users connect their " +
+      "paycheck (gross pay, take-home pay, pay schedule) to see " +
+      "spending patterns, run a Spending Review, Budget Comparison, " +
+      "Savings Mission, and view their Money Receipt.\n" +
+      "- Plan (/plan) – the Planning Financial Blueprint. Users " +
+      "enter monthly income and expenses to get a Recommended " +
+      "Priority, emergency fund coverage, debt timeline, and a " +
+      "connected 30/60/90-day roadmap (Financial Foundation, Your " +
+      "Recommended Priority, Budget Position, Emergency Protection, " +
+      "Divide Your Available Money).\n" +
+      "- Grow (/grow) – the Growth Command Center. Users enter " +
+      "current savings, monthly contribution, and timeline to see " +
+      "Growth Readiness, Savings Coverage, estimated growth, and " +
+      "get a personalized Growth Blueprint.\n" +
+      "- Wealth Lab (/wealth-lab#investment-gps) – Investment GPS. " +
+      "Users manually track their investment portfolio (holdings, " +
+      "shares, cost basis), see an Investment Readiness Score, " +
+      "portfolio allocation, and a wealth projection based on " +
+      "contributions and timeline.\n" +
+      "- AI Preview (/ai-preview) – a dedicated page for asking you " +
+      "questions directly, organized by category (Review, Spending, " +
+      "Planning, Growth). This is the page the person may already " +
+      "be on right now.\n" +
+      "\n" +
+      "GUIDANCE FOR DIRECTING PEOPLE: when someone's question " +
+      "matches one of these tools, tell them in one short sentence " +
+      "and name the page (e.g. \"You can check that on the Plan " +
+      "page\"). If they haven't mentioned checking their Financial " +
+      "Health Score yet and seem new, it's often the natural first " +
+      "step to suggest. Don't list multiple pages unless asked – " +
+      "recommend the single most relevant one for what they asked.";
+
+    // Which persona name to use – each page on the site sends its
+    // own name (Veto on the homepage and free preview, Veto on the
+    // unlimited page). Defaults to Veto if not sent.
+    const botName =
+      typeof req.body.botName === "string" && req.body.botName.trim()
+        ? req.body.botName.trim().slice(0, 30)
+        : "Veto";
+
+    // NEW: pull in the tool-completion flags the frontend sends via
+    // getUserProfile(). Everything here is optional/defensive since
+    // older pages or a stripped-down embed might not send it.
+    const userProfile =
+      req.body.userProfile && typeof req.body.userProfile === "object"
+        ? req.body.userProfile
+        : {};
+
+    const TOOL_LINKS = {
+      score: { label: "the Score page", url: "/check-your-score" },
+      spending: { label: "the Spending page", url: "/spending" },
+      plan: { label: "the Plan page", url: "/plan" },
+      grow: { label: "the Grow page", url: "/grow" },
+      invest: { label: "the Wealth Lab", url: "/wealth-lab#investment-gps" }
+    };
+
+    // Build a short list of which tools this specific person has NOT
+    // used yet, based on the flags the frontend already computes from
+    // their saved localStorage data (hasScore, hasSpendingData, etc.).
+    // Order matters: Score first since it's the recommended starting
+    // point, matching the guidance already given in siteMap above.
+    var unfinishedTools = [];
+    if (userProfile.hasScore === false) unfinishedTools.push("score");
+    if (userProfile.hasSpendingData === false) unfinishedTools.push("spending");
+    if (userProfile.hasPlan === false) unfinishedTools.push("plan");
+    if (userProfile.hasGrowData === false) unfinishedTools.push("grow");
+    if (userProfile.hasInvestData === false) unfinishedTools.push("invest");
+
+    let toolNudgeBlock = "";
+
+    if (unfinishedTools.length > 0) {
+      var toolLines = unfinishedTools
+        .map(function (key) {
+          var t = TOOL_LINKS[key];
+          return "- " + key + ": " + t.label + " (" + t.url + ")";
+        })
+        .join("\n");
+
+      toolNudgeBlock =
+        "\n\nTOOLS THIS PERSON HASN'T USED YET (based on their saved " +
+        "data, or lack of it):\n" + toolLines + "\n\n" +
+        "GUIDANCE FOR SUGGESTING THESE: only bring one of these up when " +
+        "it is genuinely relevant to what the person just asked — for " +
+        "example, if they ask about their financial situation broadly " +
+        "and they haven't done their Score yet, suggesting the Score " +
+        "page is the natural next step. Do NOT mention an unfinished " +
+        "tool in every reply, and do NOT suggest a tool that doesn't " +
+        "fit the conversation just because it's on this list (e.g. " +
+        "don't push Investing on someone asking about debt payoff). " +
+        "When you do suggest one, recommend at most ONE, and format it " +
+        "as a markdown link exactly like this: [the Score page]" +
+        "(/check-your-score) — using the exact label and URL from the " +
+        "list above so the site can turn it into a clickable link.";
+    }
+
+    const systemPrompt =
+      "You are " + botName + ", the friendly, encouraging AI coach " +
+      "built into the NextMoveAI website. You help people understand " +
+      "budgeting, saving, debt, and general financial concepts in " +
+      "plain, simple language, AND you help them navigate the site " +
+      "itself – pointing them to the right page or tool for what " +
+      "they're trying to do. Keep replies short – 2-4 sentences, " +
+      "conversational, no long lists unless asked. You are NOT a " +
+      "licensed financial advisor and must not give specific " +
+      "investment, tax, or legal advice, or recommend specific " +
+      "financial products. For anything requiring licensed advice, " +
+      "gently suggest they speak with a qualified professional. " +
+      "Never claim to access the user's real account or bank data " +
+      "unless it has been explicitly included below as connected " +
+      "context – if no context is provided, you only know what the " +
+      "person tells you in the conversation.\n\n" +
+      siteMap +
+      toolNudgeBlock;
+
+    // Optional extra context sent from the front end: which
+    // category the person selected (Review/Spending/Planning/
+    // Growth) and, if they explicitly connected it, their saved
+    // Financial Health Review numbers. Both are plain strings –
+    // never trust or invent data that wasn't actually sent.
+    const category =
+      typeof req.body.category === "string" ? req.body.category.slice(0, 40) : "";
+
+    const connectedReview =
+      typeof req.body.connectedReview === "string"
+        ? req.body.connectedReview.slice(0, 2500)
+        : "";
+
+    let contextBlock = "";
+
+    if (category) {
+      contextBlock +=
+        "\n\nThe person selected the \"" + category + "\" category " +
+        "before asking this question – lean your answer toward that " +
+        "area unless the question clearly points elsewhere.";
+    }
+
+    if (connectedReview) {
+      contextBlock +=
+        "\n\nThe person has connected their saved Financial Health " +
+        "Review. Here is that data exactly as provided – you may " +
+        "reference it directly:\n" + connectedReview;
+    }
+
+    // NEW: if the person HAS a saved score, let Veto reference the
+    // actual number naturally (this was already being sent by the
+    // frontend as part of userProfile but never surfaced before).
+    if (typeof userProfile.scoreValue === "number") {
+      contextBlock +=
+        "\n\nThe person's current Financial Health Score is " +
+        userProfile.scoreValue + "/100. You may reference this " +
+        "directly if relevant to their question.";
+    }
+
+    const fullSystemPrompt = systemPrompt + contextBlock;
+
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01"
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-5",
+        max_tokens: 400,
+        system: fullSystemPrompt,
+        messages: trimmed
+      })
     });
-  }
 
-  if (req.method === "POST") {
-    const { tool, data: toolData } = req.body || {};
-    if (!tool || typeof toolData === "undefined") {
-      return res.status(400).json({ success: false, error: "tool and data required" });
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error("Anthropic API error:", errText);
+      return res.status(502).json({ error: "AI service error" });
     }
 
-    const { data: existing } = await supabase
-      .from("nma_users")
-      .select("tools")
-      .eq("email", email)
-      .single();
+    const data = await response.json();
 
-    const mergedTools = { ...(existing ? existing.tools : {}), [tool]: toolData };
+    const reply = (data.content || [])
+      .map((block) => (block.type === "text" ? block.text : ""))
+      .join("")
+      .trim();
 
-    const { error } = await supabase
-      .from("nma_users")
-      .update({ tools: mergedTools, updated_at: new Date().toISOString() })
-      .eq("email", email);
-
-    if (error) {
-      console.error("sync save error:", error);
-      return res.status(500).json({ success: false, error: "Could not save data" });
+    // Only count this toward the free limit on a successful reply —
+    // a failed Anthropic call shouldn't cost the person a question.
+    if (!isPro) {
+      await incrementUsage(deviceId, usage.count);
     }
-    return res.status(200).json({ success: true });
-  }
 
-  return res.status(405).json({ success: false, error: "Method not allowed" });
+    return res.status(200).json({
+      reply: reply || "Sorry, I didn't catch that — could you rephrase?",
+      isPro: isPro
+    });
+
+  } catch (err) {
+    console.error("Chat handler error:", err);
+    return res.status(500).json({ error: "Something went wrong" });
+  }
 }
