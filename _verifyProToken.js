@@ -5,11 +5,11 @@
 // trusting any client-sent "isPro" flag directly.
 //
 // Usage:
-//   const { verifyProToken } = require("./_verifyProToken");
+//   import { verifyProToken } from "./_verifyProToken.js";
 //   const proEmail = verifyProToken(req.body.nmxProToken);
 //   const isPro = !!proEmail;
 
-const crypto = require("crypto");
+import crypto from "node:crypto";
 
 function base64urlDecode(input) {
   input = input.replace(/-/g, "+").replace(/_/g, "/");
@@ -35,25 +35,25 @@ function sign(payloadB64, secret) {
  * Returns the verified email string if the token is valid and not
  * expired, otherwise returns null. Never throws.
  */
-function verifyProToken(token) {
+export function verifyProToken(token) {
   try {
     if (!token || typeof token !== "string") { return null; }
-    var secret = process.env.PRO_TOKEN_SECRET;
+    const secret = process.env.PRO_TOKEN_SECRET;
     if (!secret) { return null; }
 
-    var parts = token.split(".");
+    const parts = token.split(".");
     if (parts.length !== 2) { return null; }
-    var payloadB64 = parts[0];
-    var signature = parts[1];
+    const payloadB64 = parts[0];
+    const signature = parts[1];
 
-    var expectedSignature = sign(payloadB64, secret);
+    const expectedSignature = sign(payloadB64, secret);
     // Constant-time comparison to avoid timing attacks.
-    var sigBuf = Buffer.from(signature);
-    var expectedBuf = Buffer.from(expectedSignature);
+    const sigBuf = Buffer.from(signature);
+    const expectedBuf = Buffer.from(expectedSignature);
     if (sigBuf.length !== expectedBuf.length) { return null; }
     if (!crypto.timingSafeEqual(sigBuf, expectedBuf)) { return null; }
 
-    var payload = JSON.parse(base64urlDecode(payloadB64));
+    const payload = JSON.parse(base64urlDecode(payloadB64));
     if (!payload || !payload.email || !payload.exp) { return null; }
     if (Date.now() > payload.exp) { return null; } // expired
 
@@ -62,5 +62,3 @@ function verifyProToken(token) {
     return null;
   }
 }
-
-module.exports = { verifyProToken: verifyProToken };
