@@ -2,21 +2,75 @@
 // NextMoveAI – AI Financial Coach chat endpoint
 // Deploy this on Vercel as: api/chat.js
 //
-// UPDATED: now verifies the PRO token sent from the frontend as
-// `nmxProToken` (minted by /pro-access via api/issue-pro-token.js)
-// instead of trusting any client-sent "isPro" flag. `isPro` below
-// is the real, server-verified value.
+// UPDATED (this version):
+// 1. Verifies the PRO token sent from the frontend as `nmxProToken`
+//    (minted by /pro-access via api/issue-pro-token.js) instead of
+//    trusting any client-sent "isPro" flag.
+// 2. Enforces the free-question limit SERVER-SIDE for the first
+//    time, using a Supabase table (chat_usage) keyed by a stable
+//    anonymous device ID the frontend now sends as `nmxDeviceId`.
+//    Previously this limit only existed in the widget's own JS,
+//    which anyone calling this endpoint directly could bypass —
+//    including burning your Anthropic API budget for free. Blocked
+//    requests now never reach the Anthropic call at all.
 //
-// IMPORTANT CAVEAT: this file does not currently enforce a free-
-// question limit at all — that has only ever lived client-side in
-// the homepage widget's JS, which anyone calling this endpoint
-// directly could already bypass regardless of PRO status. `isPro`
-// is wired in and ready to use, but actually rate-limiting requests
-// server-side (e.g. tracking a per-person question count in
-// Supabase) is separate follow-up work, not part of this patch.
+// Requires (in addition to ANTHROPIC_API_KEY, already set):
+//   SUPABASE_URL, SUPABASE_SERVICE_KEY — already set in this project
+//   PRO_TOKEN_SECRET — already set, used by _verifyProToken
+//
+// Requires the "chat_usage" table — see supabase-chat-usage-table.sql
+// Requires the @supabase/supabase-js package as a dependency.
 // ============================================================
 
 const { verifyProToken } = require("./_verifyProToken");
+const { createClient } = require("@supabase/supabase-js");
+
+const FREE_QUESTION_LIMIT = 4;
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
+);
+
+// Looks up how many free questions this device has already used.
+// Fails OPEN (allows the request) if Supabase itself has a problem —
+// a DB hiccup should never be the reason a legitimate free user gets
+// blocked, and worst case is a handful of extra free questions.
+async function getUsage(deviceId) {
+  if (!deviceId) return { count: 0 };
+
+  const { data, error } = await supabase
+    .from("chat_usage")
+    .select("question_count")
+    .eq("device_id", deviceId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("Supabase usage lookup error:", error);
+    return { count: 0 };
+  }
+
+  return { count: data ? data.question_count : 0 };
+}
+
+async function incrementUsage(deviceId, currentCount) {
+  if (!deviceId) return;
+
+  const { error } = await supabase
+    .from("chat_usage")
+    .upsert(
+      {
+        device_id: deviceId,
+        question_count: currentCount + 1,
+        last_seen: new Date().toISOString()
+      },
+      { onConflict: "device_id" }
+    );
+
+  if (error) {
+    console.error("Supabase usage increment error:", error);
+  }
+}
 
 export default async function handler(req, res) {
 
@@ -55,6 +109,26 @@ export default async function handler(req, res) {
     // the token is valid and not expired, or null otherwise.
     const proEmail = verifyProToken(req.body.nmxProToken);
     const isPro = !!proEmail;
+
+    // Stable anonymous ID the frontend generates once and stores in
+    // localStorage, sent with every request. Used only to enforce
+    // the free-question limit — never tied to any personal data.
+    const deviceId =
+      typeof req.body.nmxDeviceId === "string"
+        ? req.body.nmxDeviceId.slice(0, 100)
+        : null;
+
+    let usage = { count: 0 };
+
+    if (!isPro) {
+      usage = await getUsage(deviceId);
+      if (usage.count >= FREE_QUESTION_LIMIT) {
+        return res.status(403).json({
+          error: "free_limit_reached",
+          message: "You've used your free questions. Upgrade to Veto PRO for unlimited access."
+        });
+      }
+    }
 
     const siteMap =
       "SITE MAP – pages on nextmoveai.ai you can direct people to:\n" +
@@ -247,8 +321,12 @@ export default async function handler(req, res) {
       .join("")
       .trim();
 
-    // isPro is now included in the response so the frontend can, if
-    // it wants, trust the server's verdict over its own local check.
+    // Only count this toward the free limit on a successful reply —
+    // a failed Anthropic call shouldn't cost the person a question.
+    if (!isPro) {
+      await incrementUsage(deviceId, usage.count);
+    }
+
     return res.status(200).json({
       reply: reply || "Sorry, I didn't catch that — could you rephrase?",
       isPro: isPro
