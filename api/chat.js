@@ -22,8 +22,8 @@
 // Requires the @supabase/supabase-js package as a dependency.
 // ============================================================
 
-const { verifyProToken } = require("./_verifyProToken");
-const { createClient } = require("@supabase/supabase-js");
+import { verifyProToken } from "./_verifyProToken.js";
+import { createClient } from "@supabase/supabase-js";
 
 const FREE_QUESTION_LIMIT = 4;
 
