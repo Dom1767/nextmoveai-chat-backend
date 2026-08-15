@@ -1,9 +1,12 @@
-// api/issue-pro-token.js
+// api/issue-pro-token.js (v2 — email optional)
 //
 // Mints a short-lived, signed token proving PRO membership.
 // This endpoint is only ever called from the /pro-access page,
 // which itself is only reachable by real Veto PRO members because
 // Squarespace's own paywall blocks everyone else from loading it.
+// That's the actual security boundary — email is no longer required
+// or reliably obtainable client-side for this Squarespace product,
+// so it's accepted only if provided and otherwise omitted.
 //
 // The token is a signed JWT-style payload: base64(payload).base64(hmac)
 // No external JWT library needed — this is intentionally minimal.
@@ -12,7 +15,7 @@
 //   PRO_TOKEN_SECRET — a long random string, kept secret. Never
 //   expose this to the client or commit it to the repo.
 
-import crypto from "node:crypto";
+const crypto = require("crypto");
 
 const TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
@@ -30,7 +33,7 @@ function sign(payloadB64, secret) {
   );
 }
 
-export default async function handler(req, res) {
+module.exports = async (req, res) => {
   // Mirror whatever CORS setup your existing api/chat.js uses —
   // this must allow requests from your Squarespace domain.
   res.setHeader("Access-Control-Allow-Origin", "https://www.nextmoveai.ai");
@@ -47,27 +50,26 @@ export default async function handler(req, res) {
     return;
   }
 
-  const secret = process.env.PRO_TOKEN_SECRET;
+  var secret = process.env.PRO_TOKEN_SECRET;
   if (!secret) {
     res.status(500).json({ error: "Server misconfigured" });
     return;
   }
 
-  const email = req.body && req.body.email;
-  if (!email || typeof email !== "string") {
-    res.status(400).json({ error: "Missing email" });
-    return;
-  }
+  // Email is best-effort only now — not required. The real proof of
+  // PRO status is that this endpoint only ever gets called from a
+  // page Squarespace's paywall already gated to the PRO plan.
+  var email = req.body && typeof req.body.email === "string" ? req.body.email.toLowerCase().trim() : null;
 
-  const payload = {
-    email: email.toLowerCase().trim(),
+  var payload = {
+    email: email || null,
     iat: Date.now(),
     exp: Date.now() + TOKEN_TTL_MS
   };
 
-  const payloadB64 = base64url(JSON.stringify(payload));
-  const signature = sign(payloadB64, secret);
-  const token = payloadB64 + "." + signature;
+  var payloadB64 = base64url(JSON.stringify(payload));
+  var signature = sign(payloadB64, secret);
+  var token = payloadB64 + "." + signature;
 
   res.status(200).json({ token: token, expiresAt: payload.exp });
-}
+};
