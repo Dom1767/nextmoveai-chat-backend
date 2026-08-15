@@ -5,11 +5,11 @@
 // trusting any client-sent "isPro" flag directly.
 //
 // Usage:
-//   import { verifyProToken } from "./_verifyProToken.js";
+//   const { verifyProToken } = require("./_verifyProToken");
 //   const proEmail = verifyProToken(req.body.nmxProToken);
 //   const isPro = !!proEmail;
 
-import crypto from "node:crypto";
+const crypto = require("crypto");
 
 function base64urlDecode(input) {
   input = input.replace(/-/g, "+").replace(/_/g, "/");
@@ -32,33 +32,39 @@ function sign(payloadB64, secret) {
 }
 
 /**
- * Returns the verified email string if the token is valid and not
- * expired, otherwise returns null. Never throws.
+ * Returns a truthy value if the token is valid and not expired,
+ * otherwise returns null. Never throws. Email may or may not be
+ * present in the payload — it's no longer required for validity,
+ * since it can't be reliably supplied by /pro-access for this
+ * Squarespace product. Callers should treat any truthy return as
+ * "this is a verified PRO member," not rely on the email specifically.
  */
-export function verifyProToken(token) {
+function verifyProToken(token) {
   try {
     if (!token || typeof token !== "string") { return null; }
-    const secret = process.env.PRO_TOKEN_SECRET;
+    var secret = process.env.PRO_TOKEN_SECRET;
     if (!secret) { return null; }
 
-    const parts = token.split(".");
+    var parts = token.split(".");
     if (parts.length !== 2) { return null; }
-    const payloadB64 = parts[0];
-    const signature = parts[1];
+    var payloadB64 = parts[0];
+    var signature = parts[1];
 
-    const expectedSignature = sign(payloadB64, secret);
+    var expectedSignature = sign(payloadB64, secret);
     // Constant-time comparison to avoid timing attacks.
-    const sigBuf = Buffer.from(signature);
-    const expectedBuf = Buffer.from(expectedSignature);
+    var sigBuf = Buffer.from(signature);
+    var expectedBuf = Buffer.from(expectedSignature);
     if (sigBuf.length !== expectedBuf.length) { return null; }
     if (!crypto.timingSafeEqual(sigBuf, expectedBuf)) { return null; }
 
-    const payload = JSON.parse(base64urlDecode(payloadB64));
-    if (!payload || !payload.email || !payload.exp) { return null; }
+    var payload = JSON.parse(base64urlDecode(payloadB64));
+    if (!payload || !payload.exp) { return null; }
     if (Date.now() > payload.exp) { return null; } // expired
 
-    return payload.email;
+    return payload.email || "verified-pro-member";
   } catch (e) {
     return null;
   }
 }
+
+module.exports = { verifyProToken: verifyProToken };
