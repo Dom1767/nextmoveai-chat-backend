@@ -1,4 +1,5 @@
-// ============================================================
+
+    // ============================================================
 // NextMoveAI – AI Financial Coach chat endpoint
 // Deploy this on Vercel as: api/chat.js
 //
@@ -13,6 +14,12 @@
 //    which anyone calling this endpoint directly could bypass —
 //    including burning your Anthropic API budget for free. Blocked
 //    requests now never reach the Anthropic call at all.
+// 3. GUIDANCE FOR DIRECTING PEOPLE is now a mandatory linking rule
+//    instead of a soft suggestion — any time Veto names a page from
+//    the site map, it must format it as a markdown link, every time,
+//    not just when actively recommending a next step. Previously
+//    this was inconsistent because the instruction only said "name
+//    the page," which the model sometimes did as plain text.
 //
 // Requires (in addition to ANTHROPIC_API_KEY, already set):
 //   SUPABASE_URL, SUPABASE_SERVICE_KEY — already set in this project
@@ -162,13 +169,19 @@ export default async function handler(req, res) {
       "Planning, Growth). This is the page the person may already " +
       "be on right now.\n" +
       "\n" +
-      "GUIDANCE FOR DIRECTING PEOPLE: when someone's question " +
-      "matches one of these tools, tell them in one short sentence " +
-      "and name the page (e.g. \"You can check that on the Plan " +
-      "page\"). If they haven't mentioned checking their Financial " +
-      "Health Score yet and seem new, it's often the natural first " +
-      "step to suggest. Don't list multiple pages unless asked – " +
-      "recommend the single most relevant one for what they asked.";
+      "GUIDANCE FOR DIRECTING PEOPLE — MANDATORY LINKING RULE: " +
+      "whenever you reference ANY page from this site map by name, " +
+      "in ANY sentence — whether you're actively recommending it or " +
+      "just mentioning it in passing — you MUST format that " +
+      "reference as a markdown link using the exact label and URL " +
+      "shown above. This applies every single time, with no " +
+      "exceptions. Do not write a page name as plain text. Correct: " +
+      "\"You can check that on the [Plan page](/plan).\" Incorrect: " +
+      "\"You can check that on the Plan page.\" If they haven't " +
+      "mentioned checking their Financial Health Score yet and seem " +
+      "new, it's often the natural first step to suggest. Don't " +
+      "list multiple pages unless asked – recommend the single most " +
+      "relevant one for what they asked, but still link it.";
 
     // Which persona name to use – each page on the site sends its
     // own name (Veto on the homepage and free preview, Veto on the
