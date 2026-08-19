@@ -23,29 +23,18 @@
 //    on-screen) plus explicit instructions, but it's a soft
 //    attempt, not a guaranteed fix, since there's no real
 //    acoustic difference to land on.
-// 3. NEW: the homepage's hero greeting bubble is an unlimited,
-//    always-available preview of Veto's voice — it's meant to
-//    sell the experience before someone has any account at all,
-//    so it intentionally bypasses BOTH the PRO check and the
-//    one-generation-ever limit that governs every other Listen
-//    button on the site (chat replies, Next Dollar, paycheck
-//    results, etc.). It's flagged by the client sending
-//    `isGreetingPreview: true`. Nothing else changes for these
-//    calls — same OpenAI request, same pronunciation nudge —
-//    and critically, using it never increments the visitor's
-//    real free-preview counter, so it doesn't eat into the one
-//    free generation they get everywhere else on the site.
-//
-//    SECURITY NOTE: because this flag is read from the request
-//    body, anyone calling this endpoint directly (not through
-//    the actual homepage) could set `isGreetingPreview: true` to
-//    get unlimited free generations for arbitrary text, bypassing
-//    the PRO paywall entirely. This is an accepted tradeoff for
-//    now — the same risk profile as any "free sample" marketing
-//    endpoint — but if abuse/cost becomes a real problem later,
-//    the fix is either IP-based rate limiting on this branch, or
-//    restricting it to a small allow-list of exact greeting
-//    strings rather than trusting the flag alone.
+// 3. NEW: the homepage's hero greeting bubble is exempt from the
+//    free-preview limit and PRO check entirely — it's meant to be
+//    a taste of what Veto's voice sounds like for every visitor,
+//    paid or not, not something that gets locked after one play.
+//    The client sends `isHeroGreeting: true` to request this.
+//    IMPORTANT: this bypass is length-capped (MAX_GREETING_LENGTH)
+//    specifically so it can't be used as a backdoor for unlimited
+//    free generation of arbitrary text — someone could otherwise
+//    copy this flag in DevTools and call the endpoint directly
+//    with any text, at your OpenAI cost, from anywhere on the
+//    internet. Capping it to roughly greeting-length text keeps
+//    the always-free behavior scoped to its actual purpose.
 //
 // Requires (in addition to OPENAI_API_KEY, already set):
 //   SUPABASE_URL, SUPABASE_SERVICE_KEY — already set in this project
@@ -58,6 +47,7 @@ import { verifyProToken } from "./_verifyProToken.js";
 import { createClient } from "@supabase/supabase-js";
 
 const FREE_TTS_LIMIT = 1;
+const MAX_GREETING_LENGTH = 220;
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -134,6 +124,18 @@ export default async function handler(req, res) {
     }
     const safeText = text.slice(0, 3500);
 
+    // The hero greeting on the homepage is always free — no PRO
+    // check, no usage counter — but only up to a short length, so
+    // this can't double as a way to get unlimited free generation
+    // of arbitrary text by spoofing the flag directly against the
+    // API from outside the site.
+    const isHeroGreeting = req.body && req.body.isHeroGreeting === true;
+
+    if (isHeroGreeting && safeText.length > MAX_GREETING_LENGTH) {
+      res.status(400).json({ error: "Greeting text is too long for the free preview." });
+      return;
+    }
+
     // Real, server-verified PRO status.
     const proEmail = verifyProToken(req.body.nmxProToken);
     const isPro = !!proEmail;
@@ -143,13 +145,9 @@ export default async function handler(req, res) {
         ? req.body.nmxDeviceId.slice(0, 100)
         : null;
 
-    // See the SECURITY NOTE above — this flag exempts the call from
-    // both the PRO check and the free-generation limit.
-    const isGreetingPreview = req.body.isGreetingPreview === true;
-
     let usage = { count: 0 };
 
-    if (!isPro && !isGreetingPreview) {
+    if (!isPro && !isHeroGreeting) {
       usage = await getUsage(deviceId);
       if (usage.count >= FREE_TTS_LIMIT) {
         res.status(403).json({
@@ -191,10 +189,8 @@ export default async function handler(req, res) {
     }
 
     // Only count this toward the free limit on a successful
-    // generation — and never for the greeting preview, since that
-    // one is meant to be unlimited and shouldn't touch this
-    // visitor's real free-preview credit for the rest of the site.
-    if (!isPro && !isGreetingPreview) {
+    // generation, and never for the hero greeting bypass.
+    if (!isPro && !isHeroGreeting) {
       await incrementUsage(deviceId, usage.count);
     }
 
