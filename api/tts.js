@@ -47,7 +47,7 @@ import { verifyProToken } from "./_verifyProToken.js";
 import { createClient } from "@supabase/supabase-js";
 
 const FREE_TTS_LIMIT = 1;
-const MAX_GREETING_LENGTH = 220;
+const MAX_GREETING_LENGTH = 500;
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
