@@ -1,5 +1,4 @@
-
-    // ============================================================
+// ============================================================
 // NextMoveAI – AI Financial Coach chat endpoint
 // Deploy this on Vercel as: api/chat.js
 //
@@ -20,6 +19,19 @@
 //    not just when actively recommending a next step. Previously
 //    this was inconsistent because the instruction only said "name
 //    the page," which the model sometimes did as plain text.
+// 4. NEW: optional calendar-intent extraction. When the frontend
+//    sends intentMode: "calendar" (used by the "Hey Veto" voice
+//    command flow — anything said after the wake phrase gets sent
+//    here), this endpoint asks Claude to return a single JSON
+//    object instead of a plain reply: a short conversational
+//    confirmation sentence plus a calendarIntent object
+//    (title/date/recurrence/category) the frontend can offer as
+//    "Add to calendar?" before writing anything. The JSON is parsed
+//    and validated server-side (parseCalendarIntentReply) — a
+//    malformed or low-confidence response always degrades to
+//    "nothing recognized" rather than risking a bad date getting
+//    saved. Normal chat requests (no intentMode, or any other
+//    value) are completely unaffected by this.
 //
 // Requires (in addition to ANTHROPIC_API_KEY, already set):
 //   SUPABASE_URL, SUPABASE_SERVICE_KEY — already set in this project
@@ -79,6 +91,115 @@ async function incrementUsage(deviceId, currentCount) {
   }
 }
 
+// ============================================================
+// CALENDAR INTENT PARSING
+//
+// In calendar-intent mode, Claude is instructed to return ONLY a
+// JSON object (see calendarInstructionsBlock below) instead of its
+// usual free-text reply. This function turns that raw text into a
+// safe { reply, calendarIntent } pair — every field is validated,
+// and anything that doesn't clearly qualify (missing/malformed
+// date, missing title, unparseable JSON, recognized left false)
+// degrades to calendarIntent.recognized = false rather than being
+// trusted. The frontend only offers "Add to calendar" when
+// recognized is true, so this is the one place that decides whether
+// something is confident enough to reach that screen at all.
+// ============================================================
+
+const VALID_RECURRENCES = new Set([
+  "none",
+  "weekly",
+  "biweekly",
+  "monthly",
+  "quarterly",
+  "yearly",
+  "semimonthly"
+]);
+
+const VALID_CATEGORIES = new Set([
+  "bill",
+  "birthday",
+  "payday",
+  "appointment",
+  "other"
+]);
+
+function parseCalendarIntentReply(rawText) {
+  const fallback = {
+    reply: "Sorry, I didn't catch that clearly — could you try again?",
+    calendarIntent: { recognized: false }
+  };
+
+  if (!rawText) return fallback;
+
+  // Strip markdown code fences in case the model wraps the JSON
+  // anyway, despite being told not to.
+  const cleaned = rawText
+    .trim()
+    .replace(/^```(?:json)?/i, "")
+    .replace(/```$/, "")
+    .trim();
+
+  let parsed;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch (e) {
+    // Not valid JSON at all — treat the raw text as a plain reply
+    // with nothing recognized, rather than failing the request.
+    return {
+      reply: rawText.trim().slice(0, 600) || fallback.reply,
+      calendarIntent: { recognized: false }
+    };
+  }
+
+  const reply =
+    typeof parsed.reply === "string" && parsed.reply.trim()
+      ? parsed.reply.trim().slice(0, 600)
+      : fallback.reply;
+
+  const rawIntent =
+    parsed.calendarIntent && typeof parsed.calendarIntent === "object"
+      ? parsed.calendarIntent
+      : {};
+
+  const dateOk =
+    typeof rawIntent.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(rawIntent.date);
+
+  const titleOk =
+    typeof rawIntent.title === "string" && rawIntent.title.trim().length > 0;
+
+  const recognized = !!rawIntent.recognized && dateOk && titleOk;
+
+  if (!recognized) {
+    return { reply, calendarIntent: { recognized: false } };
+  }
+
+  const recurrence = VALID_RECURRENCES.has(rawIntent.recurrence)
+    ? rawIntent.recurrence
+    : "none";
+
+  const category = VALID_CATEGORIES.has(rawIntent.category)
+    ? rawIntent.category
+    : "other";
+
+  return {
+    reply,
+    calendarIntent: {
+      recognized: true,
+      title: rawIntent.title.trim().slice(0, 80),
+      date: rawIntent.date,
+      recurrence,
+      semiMonthlyDay1: Number.isInteger(rawIntent.semiMonthlyDay1)
+        ? rawIntent.semiMonthlyDay1
+        : null,
+      semiMonthlyDay2: Number.isInteger(rawIntent.semiMonthlyDay2)
+        ? rawIntent.semiMonthlyDay2
+        : null,
+      category
+    }
+  };
+}
+
 export default async function handler(req, res) {
 
   const allowedOrigin = process.env.ALLOWED_ORIGIN || "*";
@@ -136,6 +257,15 @@ export default async function handler(req, res) {
         });
       }
     }
+
+    // Optional: "Hey Veto" voice commands send intentMode: "calendar"
+    // so this endpoint can attempt to extract a calendar/reminder
+    // intent alongside its normal reply, instead of just chatting.
+    // Any other value, or no value at all, leaves everything below
+    // exactly as it was.
+    const intentMode =
+      typeof req.body.intentMode === "string" ? req.body.intentMode.slice(0, 40) : "";
+    const isCalendarIntent = intentMode === "calendar";
 
     const siteMap =
       "SITE MAP – pages on nextmoveai.ai you can direct people to:\n" +
@@ -304,7 +434,62 @@ export default async function handler(req, res) {
         "directly if relevant to their question.";
     }
 
-    const fullSystemPrompt = systemPrompt + contextBlock;
+    // NEW: calendar-intent mode instructions. Only added when the
+    // frontend explicitly requests it — everything above (site map,
+    // tool nudges, normal persona instructions) still applies as-is,
+    // this just adds an additional, very specific output-format
+    // requirement on top for this one request.
+    let calendarInstructionsBlock = "";
+
+    if (isCalendarIntent) {
+      const now = new Date();
+      const todayIso = now.toISOString().slice(0, 10);
+      const todayLabel = now.toLocaleDateString("en-US", {
+        weekday: "long",
+        year: "numeric",
+        month: "long",
+        day: "numeric"
+      });
+
+      calendarInstructionsBlock =
+        "\n\nCALENDAR INTENT MODE — this message came from a voice " +
+        "command starting with \"Hey Veto\"; what follows is " +
+        "everything the person said after that. Today's date is " +
+        todayLabel + " (" + todayIso + "). Try to extract a single " +
+        "calendar or reminder event from what they said: a title and " +
+        "a date, and optionally a recurrence pattern.\n\n" +
+        "Resolve relative dates (\"tomorrow\", \"next Friday\", \"in " +
+        "3 months\") against today's date above. If only a month and " +
+        "day are given with no year, and that date has already " +
+        "passed this year, use next year instead.\n\n" +
+        "Respond with ONLY a single JSON object — no markdown code " +
+        "fences, no text before or after it, nothing else. Exact " +
+        "shape:\n" +
+        "{\n" +
+        "  \"reply\": \"<a short, warm confirmation question, e.g. " +
+        "'I've got it: Car insurance — September 12. Add it to your " +
+        "calendar?' — or, if you couldn't confidently identify a " +
+        "title and date, a brief clarifying question instead>\",\n" +
+        "  \"calendarIntent\": {\n" +
+        "    \"recognized\": true or false,\n" +
+        "    \"title\": \"<short event title, 3-6 words>\",\n" +
+        "    \"date\": \"<YYYY-MM-DD>\",\n" +
+        "    \"recurrence\": \"none\" | \"weekly\" | \"biweekly\" | " +
+        "\"monthly\" | \"quarterly\" | \"yearly\" | \"semimonthly\",\n" +
+        "    \"semiMonthlyDay1\": <day number 1-31, or null>,\n" +
+        "    \"semiMonthlyDay2\": <day number 1-31, or null>,\n" +
+        "    \"category\": \"bill\" | \"birthday\" | \"payday\" | " +
+        "\"appointment\" | \"other\"\n" +
+        "  }\n" +
+        "}\n\n" +
+        "Set recognized to false, and leave title/date out, if you " +
+        "cannot confidently identify BOTH an event and a specific " +
+        "date from what was said — never guess a date. Do not wrap " +
+        "the JSON in markdown formatting or add any commentary " +
+        "outside the JSON object itself.";
+    }
+
+    const fullSystemPrompt = systemPrompt + contextBlock + calendarInstructionsBlock;
 
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -315,7 +500,7 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         model: "claude-sonnet-5",
-        max_tokens: 400,
+        max_tokens: isCalendarIntent ? 500 : 400,
         system: fullSystemPrompt,
         messages: trimmed
       })
@@ -338,6 +523,15 @@ export default async function handler(req, res) {
     // a failed Anthropic call shouldn't cost the person a question.
     if (!isPro) {
       await incrementUsage(deviceId, usage.count);
+    }
+
+    if (isCalendarIntent) {
+      const { reply: parsedReply, calendarIntent } = parseCalendarIntentReply(reply);
+      return res.status(200).json({
+        reply: parsedReply,
+        calendarIntent,
+        isPro: isPro
+      });
     }
 
     return res.status(200).json({
