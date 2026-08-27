@@ -56,7 +56,13 @@ const supabase = createClient(
 // a DB hiccup should never be the reason a legitimate free user gets
 // blocked, and worst case is a handful of extra free questions.
 async function getUsage(deviceId) {
-  if (!deviceId) return { count: 0 };
+  // Missing identity must never be treated as "zero usage so far" —
+  // that's exactly the bug that let requests with no device ID
+  // sail through as accidentally-unlimited. Callers are required to
+  // reject a missing deviceId before ever calling this.
+  if (!deviceId) {
+    throw new Error("missing_device_id");
+  }
 
   const { data, error } = await supabase
     .from("chat_usage")
@@ -234,13 +240,18 @@ export default async function handler(req, res) {
 
     // Real, server-verified PRO status — replaces trusting any
     // client-sent flag. proEmail is the verified member's email if
-    // the token is valid and not expired, or null otherwise.
+    // the token is valid and not expired, or null otherwise. This
+    // is the actual entitlement check: PRO token = unlimited,
+    // anything else = free tier with the tracked limit below.
+    // Device ID never proves PRO status by itself — it only tracks
+    // free-tier usage.
     const proEmail = verifyProToken(req.body.nmxProToken);
     const isPro = !!proEmail;
 
     // Stable anonymous ID the frontend generates once and stores in
     // localStorage, sent with every request. Used only to enforce
-    // the free-question limit — never tied to any personal data.
+    // the free-question limit — never tied to any personal data,
+    // and never a substitute for the PRO token above.
     const deviceId =
       typeof req.body.nmxDeviceId === "string"
         ? req.body.nmxDeviceId.slice(0, 100)
@@ -249,6 +260,18 @@ export default async function handler(req, res) {
     let usage = { count: 0 };
 
     if (!isPro) {
+      // Missing identity must fail closed, not open — a request
+      // with no device ID used to slip through getUsage()'s old
+      // "no id, assume zero usage" guard and effectively run
+      // unlimited. That guard is gone; this is the single place
+      // that decides what happens when there's nothing to track.
+      if (!deviceId) {
+        return res.status(400).json({
+          error: "missing_device_id",
+          message: "A device identifier is required to use the free tier."
+        });
+      }
+
       usage = await getUsage(deviceId);
       if (usage.count >= FREE_QUESTION_LIMIT) {
         return res.status(403).json({
