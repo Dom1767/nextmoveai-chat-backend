@@ -23,7 +23,7 @@
 //    on-screen) plus explicit instructions, but it's a soft
 //    attempt, not a guaranteed fix, since there's no real
 //    acoustic difference to land on.
-// 3. NEW: the homepage's hero greeting bubble is exempt from the
+// 3. The homepage's hero greeting bubble is exempt from the
 //    free-preview limit and PRO check entirely — it's meant to be
 //    a taste of what Veto's voice sounds like for every visitor,
 //    paid or not, not something that gets locked after one play.
@@ -35,6 +35,19 @@
 //    with any text, at your OpenAI cost, from anywhere on the
 //    internet. Capping it to roughly greeting-length text keeps
 //    the always-free behavior scoped to its actual purpose.
+//
+// UPDATED AGAIN (fail-closed entitlement check):
+// 4. PRO token is now the sole entitlement check; a missing device
+//    ID on the free path used to silently mean "zero usage so far"
+//    (via getUsage()'s old `if (!deviceId) return { count: 0 }`
+//    guard), which is functionally the same as unlimited free
+//    generation for any request that simply didn't send an ID.
+//    That guard is gone — getUsage() now throws if it's ever
+//    called without a deviceId, and the handler itself requires a
+//    deviceId up front on the free path (400 missing_device_id if
+//    absent) before ever reaching getUsage(). Device ID still
+//    never proves PRO status by itself; it's free-tier tracking
+//    only, gated entirely behind "not already PRO."
 //
 // Requires (in addition to OPENAI_API_KEY, already set):
 //   SUPABASE_URL, SUPABASE_SERVICE_KEY — already set in this project
@@ -55,7 +68,13 @@ const supabase = createClient(
 );
 
 async function getUsage(deviceId) {
-  if (!deviceId) return { count: 0 };
+  // Missing identity must never be treated as "zero usage so far" —
+  // that silently meant unlimited free generation for any request
+  // that omitted a device ID. Callers are required to reject a
+  // missing deviceId before ever calling this.
+  if (!deviceId) {
+    throw new Error("missing_device_id");
+  }
 
   const { data, error } = await supabase
     .from("tts_usage")
@@ -65,7 +84,7 @@ async function getUsage(deviceId) {
 
   if (error) {
     console.error("Supabase TTS usage lookup error:", error);
-    return { count: 0 }; // fail open — a DB hiccup shouldn't block a legit free preview
+    return { count: 0 }; // fail open on a DB hiccup — a legit free preview shouldn't be blocked by an outage
   }
 
   return { count: data ? data.generation_count : 0 };
@@ -136,7 +155,9 @@ export default async function handler(req, res) {
       return;
     }
 
-    // Real, server-verified PRO status.
+    // Real, server-verified PRO status — the actual entitlement
+    // check. Device ID (below) is free-tier usage tracking only
+    // and never substitutes for a valid PRO token.
     const proEmail = verifyProToken(req.body.nmxProToken);
     const isPro = !!proEmail;
 
@@ -148,6 +169,17 @@ export default async function handler(req, res) {
     let usage = { count: 0 };
 
     if (!isPro && !isHeroGreeting) {
+      // Missing identity fails closed, not open — see getUsage()'s
+      // comment above for why this check has to happen here, before
+      // ever calling it.
+      if (!deviceId) {
+        res.status(400).json({
+          error: "missing_device_id",
+          message: "A device identifier is required to use the free voice preview."
+        });
+        return;
+      }
+
       usage = await getUsage(deviceId);
       if (usage.count >= FREE_TTS_LIMIT) {
         res.status(403).json({
