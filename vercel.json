@@ -1,6 +1,6 @@
 {
   "crons": [
     { "path": "/api/dates/check-reminders", "schedule": "0 13 * * *" },
-    { "path": "/api/cron/scan-top-performer", "schedule": "*/15 13-21 * * 1-5" }
+    { "path": "/api/cron/scan-top-performer", "schedule": "0 20 * * 1-5" }
   ]
 }
