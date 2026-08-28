@@ -1,7 +1,6 @@
 // /api/market.js
-// Combined live-quote + price-history endpoint for Investment GPS.
-// Replaces the separate quote.js and series.js files with ONE file
-// that handles both, based on a `type` query parameter.
+// Combined live-quote + price-history + top-performer endpoint for
+// Investment GPS.
 //
 // Setup:
 // 1. Create a free account at https://twelvedata.com and grab an API key.
@@ -10,9 +9,27 @@
 // 3. Add this single file to the SAME Vercel project that already
 //    serves Dalo's /api/chat endpoint, at the path: api/market.js
 //
-// Usage (this is what the Investment GPS page already calls):
+// Usage:
 //   GET /api/market?type=quote&symbol=AAPL
 //   GET /api/market?type=series&symbol=AAPL&interval=1day&outputsize=66
+//   GET /api/market?type=top-performer
+//
+// UPDATED: added type=top-performer. This does NOT scan the market
+// live on request — it reads a cached row that api/cron/scan-
+// top-performer.js writes once it finishes its incremental daily
+// scan (see that file's comments for why scanning happens
+// incrementally rather than all at once). If the cron job hasn't
+// completed a scan yet (first deploy, or mid-scan), this returns a
+// 404 with a clear "not ready yet" message rather than a fake or
+// stale-looking result — the frontend should treat that the same
+// way it treats any other market-data fetch failure.
+
+import { createClient } from "@supabase/supabase-js";
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
+);
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -25,6 +42,37 @@ export default async function handler(req, res) {
   }
 
   const type = (req.query.type || "quote").toString();
+
+  if (type === "top-performer") {
+    try {
+      const { data, error } = await supabase
+        .from("nma_market_snapshot")
+        .select("*")
+        .eq("id", 1)
+        .maybeSingle();
+
+      if (error || !data || !data.symbol) {
+        res.status(404).json({
+          error: "Market Spotlight hasn't finished its first daily scan yet.",
+        });
+        return;
+      }
+
+      res.status(200).json({
+        symbol: data.symbol,
+        name: data.name || data.symbol,
+        price: Number(data.price),
+        return30d: Number(data.return_30d),
+        startPrice: Number(data.start_price),
+        sector: data.sector || "",
+        updatedAt: data.updated_at,
+      });
+    } catch (err) {
+      res.status(500).json({ error: "Market Spotlight request failed." });
+    }
+    return;
+  }
+
   const symbol = (req.query.symbol || "").toString().trim().toUpperCase();
 
   if (!symbol) {
