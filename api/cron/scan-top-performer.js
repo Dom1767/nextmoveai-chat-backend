@@ -47,7 +47,7 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
-const BATCH_SIZE = 8; // tickers processed per invocation — tune against your Twelve Data plan's per-minute limit
+const BATCH_SIZE = 4; // tickers processed per invocation — tune against your Twelve Data plan's per-minute limit
 const LOOKBACK_DAYS_OUTPUTSIZE = 24; // ~30 calendar days of trading-day price points; time_series returns most-recent-first
 
 function todayISODate() {
