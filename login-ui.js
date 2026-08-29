@@ -4,31 +4,40 @@
 //   <script src="https://nextmoveai-chat-backend.vercel.app/tool-sync.js"></script>
 //   <script src="https://nextmoveai-chat-backend.vercel.app/login-ui.js"></script>
 //
-// This is the ONE modal/UI for logging in anywhere on the site.
-// It builds its own markup + styles at runtime, so a page needs
-// nothing but the two script tags above plus a way to open it.
+// This is the ONE modal/UI for logging in anywhere on the site —
+// including /pro-access. It builds its own markup + styles at
+// runtime, so a page needs nothing but the two script tags above
+// plus a way to open it.
 //
-// TWO WAYS TO OPEN IT ON A PAGE:
+// THREE WAYS TO OPEN IT ON A PAGE:
 //
 // 1) Automatic — any element with data-nmx-sync-open opens it:
 //      <button type="button" data-nmx-sync-open>Sync my data</button>
 //
-// 2) Programmatic — call it directly from your own code:
-//      NextMoveSyncUI.open();
+// 2) Automatic, PRO mode — add data-nmx-sync-open-pro instead, ONLY
+//    on /pro-access (this tells the backend to also activate PRO,
+//    which is only safe on a page already behind Squarespace's
+//    paywall):
+//      <button type="button" data-nmx-sync-open-pro>Activate PRO</button>
+//
+// 3) Programmatic:
+//      NextMoveSyncUI.open();               // regular login
+//      NextMoveSyncUI.open({ pro: true });  // PRO activation, /pro-access only
 //
 // WHEN LOGIN SUCCEEDS:
-//   A "nmx-sync-login" event fires on window. Pages that need to
-//   react (e.g. re-fetch synced data right away instead of waiting
-//   for their next page load) can listen for it:
+//   A "nmx-sync-login" event fires on window, with detail.pro set
+//   to true/false depending on which flow completed. Pages that
+//   need to react (e.g. re-fetch synced data right away instead of
+//   waiting for their next page load) can listen for it:
 //
-//     window.addEventListener("nmx-sync-login", function () {
-//       // e.g. re-run NextMoveSync.get(...) here
+//     window.addEventListener("nmx-sync-login", function (e) {
+//       // e.detail.pro tells you whether this was a PRO activation
 //     });
 //
 // This widget does NOT talk to the backend directly — it only
-// calls window.NextMoveSync.login() / .confirmLogin(), same as
-// any other page would. tool-sync.js remains the only code that
-// owns auth and persistence.
+// calls window.NextMoveSync.login() / .confirmLogin(), same as any
+// other page would. tool-sync.js remains the only code that owns
+// auth and persistence.
 // =========================================================
 
 (function () {
@@ -67,8 +76,8 @@
       '<button type="button" class="nmx-sync-ui-close" id="nmxSyncUiClose" aria-label="Close">✕</button>' +
 
       '<div id="nmxSyncUiStepEmail">' +
-        '<h3>Sync your account</h3>' +
-        '<p>We\'ll email you a 6-digit code to confirm it\'s you. This keeps your data with you across every device.</p>' +
+        '<h3 id="nmxSyncUiEmailHeading">Sync your account</h3>' +
+        '<p id="nmxSyncUiEmailSub">We\'ll email you a 6-digit code to confirm it\'s you. This keeps your data with you across every device.</p>' +
         '<input type="email" id="nmxSyncUiEmailInput" placeholder="you@email.com" autocomplete="email">' +
         '<div class="nmx-sync-ui-actions">' +
           '<button type="button" class="nmx-sync-ui-cancel" id="nmxSyncUiCancel1">Cancel</button>' +
@@ -92,18 +101,32 @@
 
   var stepEmail = document.getElementById("nmxSyncUiStepEmail");
   var stepCode = document.getElementById("nmxSyncUiStepCode");
+  var emailHeading = document.getElementById("nmxSyncUiEmailHeading");
+  var emailSub = document.getElementById("nmxSyncUiEmailSub");
   var emailInput = document.getElementById("nmxSyncUiEmailInput");
   var codeInput = document.getElementById("nmxSyncUiCodeInput");
   var statusEl = document.getElementById("nmxSyncUiStatus");
   var sendBtn = document.getElementById("nmxSyncUiSendCode");
   var verifyBtn = document.getElementById("nmxSyncUiVerify");
 
+  var currentMode = { pro: false };
+
   function showStatus(msg, kind) {
     statusEl.textContent = msg;
     statusEl.className = "nmx-sync-ui-status" + (kind ? " is-" + kind : "");
   }
 
-  function resetModal() {
+  function resetModal(opts) {
+    currentMode = { pro: !!(opts && opts.pro) };
+
+    if (currentMode.pro) {
+      emailHeading.textContent = "Activate PRO";
+      emailSub.textContent = "We'll email you a 6-digit code to confirm it's you and activate your PRO membership on this device.";
+    } else {
+      emailHeading.textContent = "Sync your account";
+      emailSub.textContent = "We'll email you a 6-digit code to confirm it's you. This keeps your data with you across every device.";
+    }
+
     stepEmail.style.display = "block";
     stepCode.style.display = "none";
     emailInput.value = "";
@@ -113,8 +136,8 @@
     verifyBtn.disabled = false;
   }
 
-  function open() {
-    resetModal();
+  function open(opts) {
+    resetModal(opts);
     backdrop.classList.add("is-open");
     setTimeout(function () { emailInput.focus(); }, 50);
   }
@@ -181,19 +204,20 @@
     verifyBtn.disabled = true;
     showStatus("Verifying…");
 
-    window.NextMoveSync.confirmLogin(code)
+    window.NextMoveSync.confirmLogin(code, { pro: currentMode.pro })
       .then(function (result) {
         verifyBtn.disabled = false;
         if (!result || !result.success) {
           showStatus((result && result.error) || "Incorrect code.", "error");
           return;
         }
-        showStatus("Synced!", "good");
+        showStatus(currentMode.pro ? "PRO activated!" : "Synced!", "good");
 
         // Let any page listening know login just completed, so it
         // can immediately re-fetch its own synced data rather than
-        // waiting for a refresh.
-        window.dispatchEvent(new CustomEvent("nmx-sync-login"));
+        // waiting for a refresh. detail.pro tells listeners which
+        // flow just completed.
+        window.dispatchEvent(new CustomEvent("nmx-sync-login", { detail: { pro: currentMode.pro } }));
 
         setTimeout(close, 700);
       })
@@ -211,9 +235,14 @@
   });
 
   // Any element already on the page with data-nmx-sync-open opens
-  // the modal on click — no per-page JS required for the common
-  // case of "just add a button that opens the sync flow."
+  // the modal in regular (non-PRO) mode.
+  // data-nmx-sync-open-pro opens it in PRO activation mode — this
+  // should ONLY ever be used on /pro-access, since PRO status is
+  // proven by reaching that page (behind Squarespace's paywall),
+  // not by anything this modal itself checks.
   document.addEventListener("click", function (e) {
+    var proTrigger = e.target.closest ? e.target.closest("[data-nmx-sync-open-pro]") : null;
+    if (proTrigger) { open({ pro: true }); return; }
     var trigger = e.target.closest ? e.target.closest("[data-nmx-sync-open]") : null;
     if (trigger) { open(); }
   });
