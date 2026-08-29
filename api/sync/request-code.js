@@ -13,8 +13,23 @@
 //
 // Requires the "@supabase/supabase-js" package — add to your
 // project with: npm install @supabase/supabase-js
+//
+// FIXED: the upsert() call now passes { onConflict: "email" }.
+// Without it, Supabase's upsert() matches on the table's PRIMARY
+// KEY by default — since no id was ever passed in here, every
+// code request inserted a brand-new row instead of replacing the
+// old one. That left multiple rows per email once someone
+// requested a code more than once, which broke the .single()
+// lookup in issue-pro-token.js (it errors on more than one match),
+// surfacing as "No code requested for this email" even when a
+// code very much had been requested.
+//
+// REQUIRES: a unique constraint on the "email" column of
+// nma_sync_codes, or onConflict has nothing to match against.
+// Check/add it in Supabase's SQL editor first:
+//   alter table nma_sync_codes add constraint
+//     nma_sync_codes_email_unique unique (email);
 // =========================================================
-
 import { createClient } from "@supabase/supabase-js";
 
 const supabase = createClient(
@@ -30,10 +45,10 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
-
   if (req.method !== "POST") {
     return res.status(405).json({ success: false, error: "Method not allowed" });
   }
@@ -49,7 +64,7 @@ export default async function handler(req, res) {
 
   const { error: dbError } = await supabase
     .from("nma_sync_codes")
-    .upsert({ email: cleanEmail, code, expires_at: expiresAt });
+    .upsert({ email: cleanEmail, code, expires_at: expiresAt }, { onConflict: "email" });
 
   if (dbError) {
     console.error("request-code db error:", dbError);
@@ -77,3 +92,4 @@ export default async function handler(req, res) {
 
   return res.status(200).json({ success: true, message: "Code sent" });
 }
+  
