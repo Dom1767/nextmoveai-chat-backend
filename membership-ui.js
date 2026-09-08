@@ -1,4 +1,5 @@
-// =========================================================
+
+   // =========================================================
 // NEXTMOVEAI — SHARED MEMBERSHIP STATUS MODULE
 // Host this alongside tool-sync.js and login-ui.js:
 //   https://nextmoveai-chat-backend.vercel.app/membership-ui.js
@@ -11,9 +12,9 @@
 // JavaScript needed at all:
 //
 //   <a href="/pro-access" class="nmx-membership-status is-login"
-//      id="nmxMembershipStatus" aria-label="Log in or reconnect membership">
+//      id="nmxMembershipStatus" aria-label="Member login — log in or reconnect membership">
 //     <span class="nmx-membership-dot" aria-hidden="true"></span>
-//     <span id="nmxMembershipStatusText">Log In</span>
+//     <span id="nmxMembershipStatusText">Member Login</span>
 //   </a>
 //
 // This script auto-detects those two ids on load. If a page doesn't
@@ -22,7 +23,7 @@
 // without needing per-page opt-in logic.
 //
 // Behavior (identical everywhere, matching the homepage exactly):
-//   - "Log In" + href="/pro-access" when no local PRO token is found
+//   - "Member Login" + href="/pro-access" when no local PRO token is found
 //   - "✓ Membership Verified" (shortened to "✓ Verified" under
 //     600px via the .nmx-membership-long CSS class) + href="/ai-coach"
 //     when one is found
@@ -78,9 +79,9 @@
     } else {
       status.classList.remove("is-verified");
       status.classList.add("is-login");
-      textEl.textContent = "Log In";
+      textEl.textContent = "Member Login";
       status.href = "/pro-access";
-      status.setAttribute("aria-label", "Log in or reconnect membership");
+      status.setAttribute("aria-label", "Member login — log in or reconnect membership");
       status.title = "Log in or reconnect your membership";
     }
   }
