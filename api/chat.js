@@ -1,4 +1,4 @@
-// ============================================================
+  // ============================================================
 // NextMoveAI – AI Financial Coach chat endpoint
 // Deploy this on Vercel as: api/chat.js
 //
@@ -455,6 +455,52 @@ export default async function handler(req, res) {
         "\n\nThe person's current Financial Health Score is " +
         userProfile.scoreValue + "/100. You may reference this " +
         "directly if relevant to their question.";
+    }
+
+    // NEW: if the person has used the standalone Homeownership GPS
+    // tool, let Veto reference their saved readiness — but only when
+    // it's actually relevant to what they asked. Homeownership is an
+    // optional goal, not part of the core Review/Spending/Plan/Grow
+    // journey, so this must never be pushed unprompted.
+    if (
+      userProfile.hasHomeReadiness === true &&
+      typeof userProfile.homeTargetPrice === "number"
+    ) {
+      var homeStatusText =
+        typeof userProfile.homeStatus === "string" ? userProfile.homeStatus : "";
+
+      var homeLine =
+        "\n\nThe person has used the Homeownership GPS tool. Their " +
+        "comfortable home-price target is $" +
+        Math.round(userProfile.homeTargetPrice).toLocaleString("en-US");
+
+      if (typeof userProfile.homeMonthlyTarget === "number") {
+        homeLine +=
+          ", with an estimated total monthly housing cost around $" +
+          Math.round(userProfile.homeMonthlyTarget).toLocaleString("en-US");
+      }
+
+      if (
+        typeof userProfile.homeDownPaymentGap === "number" &&
+        userProfile.homeDownPaymentGap > 0
+      ) {
+        homeLine +=
+          ". They are about $" +
+          Math.round(userProfile.homeDownPaymentGap).toLocaleString("en-US") +
+          " short of a 20% down payment on that target";
+      }
+
+      if (homeStatusText) {
+        homeLine += ". Their current readiness status is \"" + homeStatusText + "\"";
+      }
+
+      homeLine +=
+        ". Only bring this up if the person asks about homeownership, " +
+        "buying a home, or their home readiness — do not raise it " +
+        "unprompted, since not everyone is house-hunting. If relevant, " +
+        "you may link to [the Homeownership GPS tool](/homeownership-gps).";
+
+      contextBlock += homeLine;
     }
 
     // NEW: calendar-intent mode instructions. Only added when the
