@@ -1,4 +1,4 @@
-  // ============================================================
+// ============================================================
 // NextMoveAI – AI Financial Coach chat endpoint
 // Deploy this on Vercel as: api/chat.js
 //
@@ -32,6 +32,22 @@
 //    "nothing recognized" rather than risking a bad date getting
 //    saved. Normal chat requests (no intentMode, or any other
 //    value) are completely unaffected by this.
+// 5. NEW: Veto Action Mode (Phase 1). For normal (non-calendar-intent)
+//    requests, Claude is given two tools — add_important_date and
+//    save_next_move — and can propose one instead of only describing
+//    it in text. This endpoint does NOT execute anything: it just
+//    extracts any tool_use block Claude returns (extractProposedActions)
+//    and forwards it to the frontend as an `actions` array alongside
+//    the normal `reply`. All validation and execution happens
+//    client-side (see veto-action-cards.js) — this file's only job is
+//    proposing, never writing. Tools are intentionally left out of
+//    calendar-intent mode, since that mode already has its own
+//    JSON-output contract (parseCalendarIntentReply) and mixing the
+//    two could make Claude return a tool_use block where a calendar
+//    JSON reply is expected. (The two features overlap in purpose —
+//    add_important_date could eventually replace the calendar-intent
+//    path entirely, but that's a separate cleanup, not part of this
+//    change.)
 //
 // Requires (in addition to ANTHROPIC_API_KEY, already set):
 //   SUPABASE_URL, SUPABASE_SERVICE_KEY — already set in this project
@@ -204,6 +220,116 @@ function parseCalendarIntentReply(rawText) {
       category
     }
   };
+}
+
+// ============================================================
+// NEW: VETO ACTION MODE — PHASE 1
+//
+// Claude never executes anything here. These tool definitions only
+// let it PROPOSE add_important_date or save_next_move as a
+// structured object instead of describing the action in plain text.
+// extractProposedActions() below just pulls any tool_use block(s)
+// out of the API response and forwards them to the frontend, which
+// independently re-validates every field before writing anything
+// (see veto-action-cards.js) — this file is not the trust boundary.
+// ============================================================
+
+const VETO_TOOLS = [
+  {
+    name: "add_important_date",
+    description:
+      "Add a bill, payday, renewal, or other date-based reminder to the member's " +
+      "Important Dates calendar. Use this whenever the member mentions a specific " +
+      "due date, payday, or recurring financial date they want tracked -- even if " +
+      "they don't explicitly ask you to 'add' it. Prefer proposing this over just " +
+      "acknowledging the date in text.",
+    input_schema: {
+      type: "object",
+      properties: {
+        title: {
+          type: "string",
+          description: "Short label, e.g. 'Rent due' or 'Car insurance renewal'"
+        },
+        date: {
+          type: "string",
+          description: "ISO date YYYY-MM-DD for the first/next occurrence"
+        },
+        recurrence: {
+          type: "string",
+          enum: ["none", "weekly", "biweekly", "semimonthly", "monthly", "quarterly", "yearly"]
+        },
+        category: {
+          type: "string",
+          enum: ["payday", "birthday", "bill", "other"]
+        },
+        semiMonthlyDay1: {
+          type: "integer",
+          description: "Only for semimonthly recurrence: first day of month (1-32, 32=last day)"
+        },
+        semiMonthlyDay2: {
+          type: "integer",
+          description: "Only for semimonthly recurrence: second day of month"
+        }
+      },
+      required: ["title", "date", "recurrence", "category"]
+    }
+  },
+  {
+    name: "save_next_move",
+    description:
+      "Save the member's current recommended priority and next action as their " +
+      "'My NextMove' snapshot, so it's what they see when they return to the " +
+      "homepage. Use this when the member confirms, agrees with, or asks to save " +
+      "the priority you just recommended -- not on your own initiative mid-explanation.",
+    input_schema: {
+      type: "object",
+      properties: {
+        priorityKey: {
+          type: "string",
+          enum: ["savings", "debt", "cashflow", "growth"],
+          description: "Which weakest-area focus this move addresses"
+        },
+        what: {
+          type: "string",
+          description: "Short label for the priority, e.g. 'Reduce high-cost debt'"
+        },
+        doNext: {
+          type: "string",
+          description:
+            "The concrete next action, e.g. 'Open Debt Freedom Planner and attack the 22% card first'"
+        },
+        reason: {
+          type: "string",
+          description: "One sentence on why this is the priority right now"
+        }
+      },
+      required: ["priorityKey", "what", "doNext"]
+    }
+  }
+];
+
+// Pulls any tool_use blocks out of a Claude API response and shapes
+// them into the plain { type, input, toolUseId } objects the
+// frontend's ACTION_CONFIG expects. Text content (Claude's normal
+// reply) is combined into `reply` as before — this only adds an
+// `actions` array alongside it.
+function extractProposedActions(claudeResponse) {
+  let reply = "";
+  const actions = [];
+
+  (claudeResponse.content || []).forEach((block) => {
+    if (block.type === "text") {
+      reply += block.text;
+    } else if (block.type === "tool_use") {
+      actions.push({
+        type: block.name,
+        input: block.input,
+        toolUseId: block.id
+      });
+    }
+  });
+
+  return { reply: reply.trim(), actions };
 }
 
 export default async function handler(req, res) {
@@ -558,7 +684,40 @@ export default async function handler(req, res) {
         "outside the JSON object itself.";
     }
 
-    const fullSystemPrompt = systemPrompt + contextBlock + calendarInstructionsBlock;
+    // NEW: action-mode guidance. Only added OUTSIDE calendar-intent
+    // mode, since that mode has its own strict JSON-only output
+    // contract above and mixing the two risks Claude returning a
+    // tool_use block where a calendar JSON reply is expected instead.
+    let actionModeBlock = "";
+
+    if (!isCalendarIntent) {
+      actionModeBlock =
+        "\n\nACTIONS: two tools are available to you — " +
+        "add_important_date (for a bill, payday, renewal, or other " +
+        "date-based reminder the person mentions) and save_next_move " +
+        "(when the person confirms or agrees with the priority you " +
+        "just recommended, to save it as their focus). When one " +
+        "clearly applies, propose the tool call instead of only " +
+        "describing the action in text. Never call a tool for " +
+        "something the person hasn't actually mentioned or confirmed " +
+        "wanting.";
+    }
+
+    const fullSystemPrompt =
+      systemPrompt + contextBlock + calendarInstructionsBlock + actionModeBlock;
+
+    // NEW: tools are only attached outside calendar-intent mode (see
+    // actionModeBlock comment above for why).
+    const anthropicBody = {
+      model: "claude-sonnet-5",
+      max_tokens: isCalendarIntent ? 500 : 600,
+      system: fullSystemPrompt,
+      messages: trimmed
+    };
+
+    if (!isCalendarIntent) {
+      anthropicBody.tools = VETO_TOOLS;
+    }
 
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -567,12 +726,7 @@ export default async function handler(req, res) {
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01"
       },
-      body: JSON.stringify({
-        model: "claude-sonnet-5",
-        max_tokens: isCalendarIntent ? 500 : 400,
-        system: fullSystemPrompt,
-        messages: trimmed
-      })
+      body: JSON.stringify(anthropicBody)
     });
 
     if (!response.ok) {
@@ -583,10 +737,9 @@ export default async function handler(req, res) {
 
     const data = await response.json();
 
-    const reply = (data.content || [])
-      .map((block) => (block.type === "text" ? block.text : ""))
-      .join("")
-      .trim();
+    // NEW: was a plain text-join; now also pulls out any proposed
+    // tool_use blocks alongside the reply text.
+    const { reply, actions } = extractProposedActions(data);
 
     // Only count this toward the free limit on a successful reply —
     // a failed Anthropic call shouldn't cost the person a question.
@@ -605,6 +758,7 @@ export default async function handler(req, res) {
 
     return res.status(200).json({
       reply: reply || "Sorry, I didn't catch that — could you rephrase?",
+      actions: actions,
       isPro: isPro
     });
 
