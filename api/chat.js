@@ -264,11 +264,11 @@ const VETO_TOOLS = [
         },
         semiMonthlyDay1: {
           type: "integer",
-          description: "Only for semimonthly recurrence: first day of month (1-32, 32=last day)"
+          description: "Only for semimonthly recurrence: first day of month, 1-31. Any day past a shorter month's end is automatically clamped to that month's last real day, so 31 alone covers 'end of month' -- no special sentinel value needed."
         },
         semiMonthlyDay2: {
           type: "integer",
-          description: "Only for semimonthly recurrence: second day of month"
+          description: "Only for semimonthly recurrence: second day of month, 1-31 (same end-of-month clamping as above)"
         }
       },
       required: ["title", "date", "recurrence", "category"]
