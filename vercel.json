@@ -2,5 +2,14 @@
   "crons": [
     { "path": "/api/dates/check-reminders", "schedule": "0 13 * * *" },
     { "path": "/api/cron/scan-top-performer", "schedule": "0 20 * * 1-5" }
+  ],
+  "headers": [
+    {
+      "source": "/veto_wave_alpha.mp4",
+      "headers": [
+        { "key": "Access-Control-Allow-Origin", "value": "*" },
+        { "key": "Cache-Control", "value": "public, max-age=604800" }
+      ]
+    }
   ]
 }
