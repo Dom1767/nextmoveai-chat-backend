@@ -3,12 +3,20 @@
 // Include on every tool page with:
 //   <script src="https://nextmoveai-chat-backend.vercel.app/tool-sync.js"></script>
 //
-// Wraps the existing, working login system (request-code -> verify)
-// and the new /api/sync/tools endpoint into one small interface so
-// no tool page has to know about tokens, auth headers, or the
-// underlying endpoints directly.
+// UPDATED: unified login. There are still two backend endpoints
+// (regular sync login vs. PRO activation), because PRO status can
+// currently only be proven by reaching /pro-access behind
+// Squarespace's paywall — see api/issue-pro-token.js for why. But
+// from every PAGE's point of view there is now just ONE login
+// flow: NextMoveSync.login() + NextMoveSync.confirmLogin().
 //
-// USAGE ON A TOOL PAGE:
+// Whichever endpoint answers, BOTH nmx_sync_token and nmx_pro_token
+// get stored whenever the response includes them. This is the fix
+// for the bug where verifying on /pro-access left the sync token
+// unset, so every other page still thought the person was logged
+// out.
+//
+// USAGE ON A TOOL PAGE (unchanged):
 //
 //   await NextMoveSync.ready;
 //
@@ -22,9 +30,16 @@
 //
 //   // to start login:
 //   await NextMoveSync.login("dale@example.com");   // sends the 6-digit code
-//   // once the user enters the code they received:
+//
+//   // once the user enters the code they received, for a REGULAR
+//   // (non-PRO) login:
 //   const result = await NextMoveSync.confirmLogin("482913");
-//   if (result.success) { /* logged in, token now stored */ }
+//
+//   // for a PRO activation login (only ever called from
+//   // /pro-access, which is itself behind Squarespace's paywall):
+//   const result = await NextMoveSync.confirmLogin("482913", { pro: true });
+//
+//   if (result.success) { /* logged in, token(s) now stored */ }
 //
 // NOTE: get()/set() silently return null/false if nobody is logged
 // in — pages should keep working from localStorage as a fallback
@@ -38,6 +53,7 @@
   var API_BASE = "https://nextmoveai-chat-backend.vercel.app";
   var TOKEN_KEY = "nmx_sync_token";
   var EMAIL_KEY = "nmx_sync_email";
+  var PRO_TOKEN_KEY = "nmx_pro_token";
 
   function getToken() {
     try { return window.localStorage.getItem(TOKEN_KEY); }
@@ -47,9 +63,32 @@
     try { return window.localStorage.getItem(EMAIL_KEY); }
     catch (e) { return null; }
   }
+  function getProToken() {
+    try { return window.localStorage.getItem(PRO_TOKEN_KEY); }
+    catch (e) { return null; }
+  }
   function storeSession(token, email) {
     try {
       if (token) { window.localStorage.setItem(TOKEN_KEY, token); }
+      if (email) { window.localStorage.setItem(EMAIL_KEY, email); }
+    } catch (e) {}
+  }
+  // Stores whichever tokens are present in a backend response.
+  // /api/sync/verify returns { token }.
+  // /api/issue-pro-token returns { token: proToken, syncToken }.
+  // This function accepts either shape safely.
+  function storeTokensFromResponse(data, email) {
+    try {
+      if (data.syncToken) {
+        window.localStorage.setItem(TOKEN_KEY, data.syncToken);
+      } else if (data.token && !data.expiresAt) {
+        // Regular sync/verify response — its "token" IS the sync token.
+        window.localStorage.setItem(TOKEN_KEY, data.token);
+      }
+      if (data.expiresAt && data.token) {
+        // issue-pro-token response — its "token" is the PRO JWT.
+        window.localStorage.setItem(PRO_TOKEN_KEY, data.token);
+      }
       if (email) { window.localStorage.setItem(EMAIL_KEY, email); }
     } catch (e) {}
   }
@@ -58,6 +97,10 @@
       window.localStorage.removeItem(TOKEN_KEY);
       window.localStorage.removeItem(EMAIL_KEY);
     } catch (e) {}
+  }
+  function clearProSession() {
+    try { window.localStorage.removeItem(PRO_TOKEN_KEY); }
+    catch (e) {}
   }
 
   function authHeaders() {
@@ -80,9 +123,24 @@
     return !!getToken();
   }
 
+  function isProMember() {
+    var token = getProToken();
+    if (!token) { return false; }
+    try {
+      var payloadB64 = token.split(".")[0].replace(/-/g, "+").replace(/_/g, "/");
+      while (payloadB64.length % 4) { payloadB64 += "="; }
+      var payload = JSON.parse(atob(payloadB64));
+      return !!(payload && payload.exp && Date.now() < payload.exp);
+    } catch (e) {
+      return false;
+    }
+  }
+
   // Step 1 of login: sends a 6-digit code to this email via the
   // existing Apps Script mailer. Does NOT log the person in yet.
+  // Shared by both the regular and PRO login flows.
   function login(email) {
+    storeSession(null, email);
     return fetch(API_BASE + "/api/sync/request-code", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -95,19 +153,31 @@
   }
 
   // Step 2 of login: confirms the code the person received by email.
-  // On success, stores the session token — from then on isLoggedIn(),
-  // get(), and set() all just work.
-  function confirmLogin(code) {
+  //
+  // options.pro = true routes to /api/issue-pro-token instead of
+  // /api/sync/verify. This should ONLY ever be passed from
+  // /pro-access, since that endpoint treats "reached this page" as
+  // proof of PRO status (Squarespace's paywall already gates it).
+  //
+  // Either way, both nmx_sync_token and nmx_pro_token get stored
+  // whenever the response includes them, so no page is ever left
+  // thinking someone is logged out when they aren't.
+  function confirmLogin(code, options) {
     var email = getStoredEmail();
-    return fetch(API_BASE + "/api/sync/verify", {
+    var pro = !!(options && options.pro);
+    var endpoint = pro ? "/api/issue-pro-token" : "/api/sync/verify";
+
+    return fetch(API_BASE + endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email: email, code: code })
     })
       .then(function (res) { return res.json(); })
       .then(function (data) {
-        if (data && data.success && data.token) {
-          storeSession(data.token, email);
+        var success = pro ? !!(data && data.token) : !!(data && data.success && data.token);
+        if (success) {
+          storeTokensFromResponse(data, email);
+          data.success = true;
         }
         return data;
       })
@@ -116,19 +186,9 @@
       });
   }
 
-  // login() needs to remember which email the code was sent to, so
-  // confirmLogin() can send it back along with the code. Storing it
-  // as soon as login() is called (rather than waiting for success)
-  // keeps this one honest round trip instead of asking the caller
-  // to pass the email again later.
-  var originalLogin = login;
-  login = function (email) {
-    storeSession(null, email);
-    return originalLogin(email);
-  };
-
   function logout() {
     clearSession();
+    clearProSession();
   }
 
   // Returns whatever was last saved under `key`, or null if nobody
@@ -178,6 +238,7 @@
   global.NextMoveSync = {
     ready: readyPromise,
     isLoggedIn: isLoggedIn,
+    isProMember: isProMember,
     login: login,
     confirmLogin: confirmLogin,
     logout: logout,
