@@ -27,6 +27,7 @@
 // =========================================================
 
 import { verifyProToken } from "./_verifyProToken.js";
+import { handleSnapshotEmail } from "./_snapshotEmail.js";
 
 export default async function handler(req, res) {
   const allowedOrigin = process.env.ALLOWED_ORIGIN || "*";
@@ -40,6 +41,13 @@ export default async function handler(req, res) {
 
   if (req.method !== "POST") {
     return res.status(405).json({ isPro: false, error: "Method not allowed" });
+  }
+
+  // 2026-10-10: "My Financial Snapshot" emails ride on this endpoint
+  // (body.action === "snapshotEmail") so the project stays within
+  // Vercel Hobby's 12-function limit. See _snapshotEmail.js.
+  if (req.body && req.body.action === "snapshotEmail") {
+    return handleSnapshotEmail(req, res);
   }
 
   const { nmxProToken } = req.body || {};
