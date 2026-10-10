@@ -1,5 +1,4 @@
-
-   // =========================================================
+// =========================================================
 // NEXTMOVEAI — SHARED MEMBERSHIP STATUS MODULE
 // Host this alongside tool-sync.js and login-ui.js:
 //   https://nextmoveai-chat-backend.vercel.app/membership-ui.js
@@ -28,11 +27,10 @@
 //     600px via the .nmx-membership-long CSS class) + href="/ai-coach"
 //     when one is found
 //
-// NOTE: this only checks whether a token exists locally, not
-// whether it's still valid/unexpired — real verification of that
-// happens server-side on any actual chat/TTS call. This badge is a
-// fast, optimistic UI signal, same as everywhere else on the site
-// that reads this token client-side.
+// UPDATED 2026-10-10: the badge now checks the token's expiry date
+// (shows "Renew PRO" once it has expired) and confirms the token with
+// /api/verify-pro once per tab session (cached 10 minutes). Chat and
+// voice still enforce PRO on the server as before.
 //
 // Re-renders on:
 //   - "storage" (verification completed in another tab of this browser)
@@ -60,8 +58,58 @@
     }
   }
 
+  // 2026-10-10: a token only counts if it hasn't expired. The token's
+  // payload carries its expiry ("exp", in milliseconds), so the badge
+  // can tell right away; the server is then asked once per tab session
+  // (cached 10 minutes) to confirm the token is genuine.
+  function tokenExpiry(token) {
+    try {
+      var b64 = String(token).split(".")[0].replace(/-/g, "+").replace(/_/g, "/");
+      while (b64.length % 4) { b64 += "="; }
+      var payload = JSON.parse(atob(b64));
+      return payload && payload.exp ? Number(payload.exp) : null;
+    } catch (e) { return null; }
+  }
+  var VERIFY_URL = "https://nextmoveai-chat-backend.vercel.app/api/verify-pro";
+  var CACHE_KEY = "nmx_pro_verify_cache";
+  function cachedVerdict(token) {
+    try {
+      var c = JSON.parse(window.sessionStorage.getItem(CACHE_KEY) || "null");
+      if (c && c.t === token.slice(-24) && Date.now() - c.at < 10 * 60 * 1000) { return c.ok; }
+    } catch (e) {}
+    return null;
+  }
   function isProMember() {
-    return !!getProToken();
+    var token = getProToken();
+    if (!token) { return false; }
+    var exp = tokenExpiry(token);
+    if (!exp || Date.now() >= exp) { return false; }
+    return cachedVerdict(token) !== false;
+  }
+  function isExpired() {
+    var token = getProToken();
+    if (!token) { return false; }
+    var exp = tokenExpiry(token);
+    return !exp || Date.now() >= exp || cachedVerdict(token) === false;
+  }
+  var verifying = false;
+  function verifyWithServer() {
+    var token = getProToken();
+    if (!token || verifying || cachedVerdict(token) !== null) { return; }
+    var exp = tokenExpiry(token);
+    if (!exp || Date.now() >= exp) { return; }
+    verifying = true;
+    fetch(VERIFY_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ nmxProToken: token }) })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        // Only record a definite answer; network trouble leaves the badge as is.
+        if (d && typeof d.isPro === "boolean") {
+          try { window.sessionStorage.setItem(CACHE_KEY, JSON.stringify({ t: token.slice(-24), ok: d.isPro, at: Date.now() })); } catch (e) {}
+          renderMembership();
+        }
+      })
+      .catch(function () {})
+      .then(function () { verifying = false; });
   }
 
   function renderMembership() {
@@ -76,6 +124,13 @@
       status.href = "/ai-coach";
       status.setAttribute("aria-label", "Membership verified. Open Veto PRO.");
       status.title = "Membership verified on this browser";
+    } else if (isExpired()) {
+      status.classList.remove("is-verified");
+      status.classList.add("is-login");
+      textEl.textContent = "Renew PRO";
+      status.href = "/pro-access";
+      status.setAttribute("aria-label", "Your PRO access has expired. Log in again to reconnect.");
+      status.title = "Your PRO access has expired. Log in again to reconnect.";
     } else {
       status.classList.remove("is-verified");
       status.classList.add("is-login");
@@ -84,6 +139,7 @@
       status.setAttribute("aria-label", "Member login — log in or reconnect membership");
       status.title = "Log in or reconnect your membership";
     }
+    verifyWithServer();
   }
 
   function init() {
@@ -115,6 +171,7 @@
   window.NextMoveMembershipUI = {
     refresh: renderMembership,
     isProMember: isProMember,
+    isExpired: isExpired,
     getProToken: getProToken
   };
 })();
