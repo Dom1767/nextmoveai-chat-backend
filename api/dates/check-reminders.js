@@ -12,6 +12,8 @@
 //      minimums, and which payments are due before the next payday.
 //   3. (NEW 2026-10-10) Debt due-date reminders, 3 days before each
 //      debt's due day (set per debt on the Debt Freedom Planner).
+//   The payday email also ends with a short "Veto's tip" that changes
+//   each payday.
 //
 // 2026-10-10 FIX: weekly, every-2-weeks and twice-a-month dates were
 // never handled here (only monthly, quarterly and yearly), so those
@@ -196,8 +198,10 @@ function buildPaydayPlan(payday, dateStr, dueBeforeNext) {
     });
   }
   if (plan.debtFreeDate) {
-    lines.push(`You're on track to be debt-free by ${plan.debtFreeDate}.`);
+    lines.push(`Estimated debt-free date: ${plan.debtFreeDate} (based on the balances, rates and payment you entered).`);
   }
+  const tip = paydayTip(plan, dateStr);
+  lines.push(`Veto's tip: ${tip}`);
   lines.push(`Changed your numbers? Update your plan: ${SITE}/debt-plan`);
 
   return {
@@ -210,8 +214,33 @@ function buildPaydayPlan(payday, dateStr, dueBeforeNext) {
     otherMinimums: otherMins,
     debtFreeDate: plan.debtFreeDate || '',
     dueBeforeNext: (dueBeforeNext || []).map((d) => ({ name: d.name, date: toDateStr(d.date), minimum: d.minimum })),
+    tip,
     link: `${SITE}/debt-plan`
   };
+}
+
+// A short, practical tip for the payday email. Debt tips when the
+// person has a target debt, general paycheck tips otherwise; rotates
+// by date so it changes each payday.
+const DEBT_TIPS = [
+  'Pay your debt right after payday, before the money gets spent elsewhere.',
+  'Ask your card company for a lower interest rate. If you pay on time, they often say yes.',
+  'Any extra money, even $20, goes to your target debt. Every dollar cuts future interest.',
+  'Turn on autopay for every minimum so a missed payment never costs you a late fee.',
+  'Paid off a debt? Roll its payment into the next one on your list.'
+];
+const PAYCHECK_TIPS = [
+  'Move a small amount to savings the day you get paid. Savings you don\'t see is savings you keep.',
+  'Check this week\'s bills before you spend on anything else.',
+  'Cancel one subscription you haven\'t used in 30 days.',
+  'Plan the week\'s groceries before you shop. It\'s one of the easiest ways to spend less.',
+  'Run the Money Leak Check at nextmoveai.ai to find easy monthly savings.'
+];
+function paydayTip(plan, dateStr) {
+  const list = plan && plan.target ? DEBT_TIPS : PAYCHECK_TIPS;
+  const d = new Date(dateStr + 'T00:00:00Z');
+  const day = Math.floor((d - Date.UTC(d.getUTCFullYear(), 0, 0)) / 86400000);
+  return list[day % list.length];
 }
 
 function money(n) {
