@@ -156,11 +156,21 @@ const VALID_RECURRENCES = new Set([
   "semimonthly"
 ]);
 
+// Must match the Important Dates page's category list. Anything else
+// is saved as "other" rather than dropped. (2026-10-10: added
+// anniversary, car, insurance, subscription, tax, vacation, work.)
 const VALID_CATEGORIES = new Set([
   "bill",
   "birthday",
   "payday",
   "appointment",
+  "anniversary",
+  "car",
+  "insurance",
+  "subscription",
+  "tax",
+  "vacation",
+  "work",
   "other"
 ]);
 
@@ -256,11 +266,16 @@ const VETO_TOOLS = [
   {
     name: "add_important_date",
     description:
-      "Add a bill, payday, renewal, or other date-based reminder to the member's " +
+      "Add a bill, payday, renewal, appointment, or other date-based reminder to the member's " +
       "Important Dates calendar. Use this whenever the member mentions a specific " +
-      "due date, payday, or recurring financial date they want tracked -- even if " +
+      "due date, payday, appointment, or recurring date they want tracked -- even if " +
       "they don't explicitly ask you to 'add' it. Prefer proposing this over just " +
-      "acknowledging the date in text.",
+      "acknowledging the date in text. Pick the most specific category: " +
+      "appointment = doctor, dentist or other medical visit; anniversary; " +
+      "car = inspection or registration; insurance = insurance renewal; " +
+      "subscription = streaming or other subscription renewal; tax = tax deadline; " +
+      "vacation = trip; work = work event; bill = bill or loan payment; " +
+      "otherwise other.",
     input_schema: {
       type: "object",
       properties: {
@@ -278,7 +293,7 @@ const VETO_TOOLS = [
         },
         category: {
           type: "string",
-          enum: ["payday", "birthday", "bill", "other"]
+          enum: ["payday", "birthday", "bill", "appointment", "anniversary", "car", "insurance", "subscription", "tax", "vacation", "work", "other"]
         },
         semiMonthlyDay1: {
           type: "integer",
@@ -914,7 +929,10 @@ export default async function handler(req, res) {
         "    \"semiMonthlyDay1\": <day number 1-31, or null>,\n" +
         "    \"semiMonthlyDay2\": <day number 1-31, or null>,\n" +
         "    \"category\": \"bill\" | \"birthday\" | \"payday\" | " +
-        "\"appointment\" | \"other\"\n" +
+        "\"appointment\" | \"anniversary\" | \"car\" | \"insurance\" | " +
+        "\"subscription\" | \"tax\" | \"vacation\" | \"work\" | \"other\"\n" +
+        "    (appointment = doctor/dentist/medical; car = inspection or " +
+        "registration; vacation = trip; work = work event)\n" +
         "  }\n" +
         "}\n\n" +
         "Set recognized to false, and leave title/date out, if you " +
