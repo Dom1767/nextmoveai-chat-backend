@@ -38,6 +38,20 @@
 
 import { createClient } from '@supabase/supabase-js';
 
+// Labels + one-line tips per Important Dates category (same list as the
+// Important Dates page, Veto's add-date action and the homepage greeting).
+const DATE_TYPES = {
+  appointment: { label: 'Doctor / Dentist', tip: 'Confirm the time, bring your insurance card, and set aside any copay so it doesn\'t surprise your budget.' },
+  anniversary: { label: 'Anniversary', tip: 'Planning to celebrate? Setting a budget now keeps the day stress-free.' },
+  car: { label: 'Car (Inspection / Registration)', tip: 'Have your registration and insurance card ready.' },
+  insurance: { label: 'Insurance Renewal', tip: 'Compare prices before it renews. A quick quote can lower it.' },
+  subscription: { label: 'Subscription', tip: 'Still using it? If not, cancel before it renews.' },
+  tax: { label: 'Tax Deadline', tip: 'Gather what you need and file on time to avoid penalties.' },
+  vacation: { label: 'Vacation / Trip', tip: 'Set a daily spending limit for the trip so it stays fun.' },
+  work: { label: 'Work Event', tip: 'Get anything you need ready ahead of time.' },
+  bill: { label: 'Bill / Renewal', tip: 'Paying on time protects your credit and avoids late fees.' }
+};
+
 const SITE = 'https://www.nextmoveai.ai';
 const DUE_REMINDER_DAYS = 3;
 
@@ -91,7 +105,18 @@ export default async function handler(req, res) {
       // Fire once per occurrence (lastReminderSentFor guards against
       // double-sends if the job runs twice in a day).
       if (diffDays === Number(entry.reminderDays) && entry.lastReminderSentFor !== nextStr) {
-        due.push({ title: entry.title, date: nextStr, category: entry.category, notes: entry.notes || '' });
+        // 2026-10-10: type-specific tip so emails aren't generic. If the
+        // entry has no notes, the tip goes in "notes" (which the current
+        // Apps Script already shows); it's also sent as "tip"/"label".
+        const t = DATE_TYPES[entry.category] || null;
+        due.push({
+          title: entry.title,
+          date: nextStr,
+          category: entry.category,
+          label: t ? t.label : '',
+          tip: t ? t.tip : '',
+          notes: entry.notes || (t ? t.tip : '')
+        });
         if (entry.id) sentMarks[entry.id] = nextStr;
       }
     }
