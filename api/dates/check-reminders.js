@@ -14,6 +14,8 @@
 //      debt's due day (set per debt on the Debt Freedom Planner).
 //   The payday email also ends with a short "Veto's tip" that changes
 //   each payday.
+//   Dates added by chatting with Veto on older homepage versions (saved
+//   under "important-dates") are included too.
 //
 // 2026-10-10 FIX: weekly, every-2-weeks and twice-a-month dates were
 // never handled here (only monthly, quarterly and yearly), so those
@@ -66,7 +68,13 @@ export default async function handler(req, res) {
     const tools = user.tools || {};
 
     // ---- 1. Important Dates reminders due today ----
-    const dates = tools.dates && Array.isArray(tools.dates.entries) ? tools.dates.entries : [];
+    // Important Dates entries. Older homepage versions saved dates added
+    // by chatting with Veto under "important-dates" (a plain list); use
+    // those too so they get reminders.
+    const fromPage = tools.dates && Array.isArray(tools.dates.entries) ? tools.dates.entries : [];
+    const fromVeto = Array.isArray(tools['important-dates']) ? tools['important-dates'] : [];
+    const seenIds = new Set(fromPage.map((e) => e && e.id).filter(Boolean));
+    const dates = fromPage.concat(fromVeto.filter((e) => e && !(e.id && seenIds.has(e.id))));
     const due = [];
     const sentMarks = {}; // entry id -> occurrence date string
 
@@ -146,10 +154,13 @@ export default async function handler(req, res) {
       .maybeSingle();
     const freshTools = (fresh && fresh.tools) || {};
 
-    if (Object.keys(sentMarks).length && freshTools.dates && Array.isArray(freshTools.dates.entries)) {
-      freshTools.dates.entries.forEach((e) => {
+    if (Object.keys(sentMarks).length) {
+      const lists = [];
+      if (freshTools.dates && Array.isArray(freshTools.dates.entries)) lists.push(freshTools.dates.entries);
+      if (Array.isArray(freshTools['important-dates'])) lists.push(freshTools['important-dates']);
+      lists.forEach((list) => list.forEach((e) => {
         if (e && e.id && sentMarks[e.id]) e.lastReminderSentFor = sentMarks[e.id];
-      });
+      }));
     }
     if (paydayPlan || Object.keys(dueSentMarks).length) {
       const prev = freshTools['debt-payday-sent'] || {};
