@@ -28,7 +28,8 @@
 //     when one is found
 //
 // UPDATED 2026-10-10: the badge now checks the token's expiry date
-// (shows "Renew PRO" once it has expired) and confirms the token with
+// (shows "Sign in again" once it has expired; a sign-in lasts 30 days,
+// so this is a re-login, not a payment) and confirms the token with
 // /api/verify-pro once per tab session (cached 10 minutes). Chat and
 // voice still enforce PRO on the server as before.
 //
@@ -127,10 +128,10 @@
     } else if (isExpired()) {
       status.classList.remove("is-verified");
       status.classList.add("is-login");
-      textEl.textContent = "Renew PRO";
+      textEl.textContent = "Sign in again";
       status.href = "/pro-access";
-      status.setAttribute("aria-label", "Your PRO access has expired. Log in again to reconnect.");
-      status.title = "Your PRO access has expired. Log in again to reconnect.";
+      status.setAttribute("aria-label", "Your PRO sign-in on this browser has expired. Sign in again to reconnect. No new payment needed.");
+      status.title = "Your PRO sign-in on this browser lasts 30 days. Sign in again to reconnect. No new payment needed.";
     } else {
       status.classList.remove("is-verified");
       status.classList.add("is-login");
