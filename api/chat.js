@@ -698,6 +698,16 @@ export default async function handler(req, res) {
       "questions directly, organized by category (Review, Spending, " +
       "Planning, Growth). This is the page the person may already " +
       "be on right now.\n" +
+      "- Important Dates (/important-dates) – a calendar for bills, " +
+      "paydays, appointments, renewals and deadlines. People can " +
+      "choose to get a reminder email before each one (they sync " +
+      "their email on that page).\n" +
+      "- Debt Planner (/debt-plan) – lists debts and shows a payoff " +
+      "plan and debt-free date.\n" +
+      "- Money Tracker (/money-tracker) – log what you spend each " +
+      "week against your budget.\n" +
+      "- My Net Worth (/net-worth) – what you own minus what you owe, " +
+      "tracked over time.\n" +
       "\n" +
       "GUIDANCE FOR DIRECTING PEOPLE — MANDATORY LINKING RULE: " +
       "whenever you reference ANY page from this site map by name, " +
@@ -949,7 +959,39 @@ export default async function handler(req, res) {
     let actionModeBlock = "";
 
     if (!isCalendarIntent) {
+      // V2 (2026-10-12): today's date so "next Tuesday" resolves
+      // correctly, plus what Veto can do for people.
+      const nowEt = new Date();
+      const todayEtIso = nowEt.toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+      const todayEtLabel = nowEt.toLocaleDateString("en-US", {
+        timeZone: "America/New_York",
+        weekday: "long",
+        year: "numeric",
+        month: "long",
+        day: "numeric"
+      });
+
       actionModeBlock =
+        "\n\nToday's date is " + todayEtLabel + " (" + todayEtIso + "). " +
+        "Resolve relative dates like \"next Tuesday\" against it. If " +
+        "only a month and day are given and that date already passed " +
+        "this year, use next year. If the person gives an event but no " +
+        "date, ask for the date instead of guessing." +
+        "\n\nWHAT YOU CAN DO: if someone asks what you can do or seems " +
+        "new, say briefly that besides answering money questions you " +
+        "can add bills, paydays, appointments and deadlines to " +
+        "[Important Dates](/important-dates), help them pick and save " +
+        "their next money move, set a small weekly step, and point them " +
+        "to the right tool. Reminder emails are sent by Important Dates " +
+        "when the person has synced their email there; never say that " +
+        "you personally will remind them or that you watch their " +
+        "calendar. When you propose add_important_date, you may add " +
+        "that they can turn on a reminder email on [Important Dates]" +
+        "(/important-dates). When your answer is something a tool on " +
+        "the site can work out for them with their own numbers, end " +
+        "with ONE short line offering that tool as a link (for example " +
+        "the [Debt Planner](/debt-plan) for a payoff question). Not in " +
+        "every reply, only when it clearly fits." +
         "\n\nACTIONS: four tools are available to you — " +
         "add_important_date (for a bill, payday, renewal, or other " +
         "date-based reminder the person mentions), save_next_move " +
