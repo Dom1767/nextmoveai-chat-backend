@@ -33,6 +33,18 @@
 // the email-ownership gap; it does not change how PRO membership
 // itself is determined.
 //
+// 2026-10-10 — APPROVED PRO MEMBERS LIST
+// Reaching /pro-access is no longer treated as proof of PRO. After the
+// email code is confirmed, the email must be on the approved list:
+//   • the Supabase table "nma_pro_members" (email, active = true), which
+//     you manage in Supabase's Table Editor (add a row when someone
+//     subscribes on Squarespace, set active = false when they cancel), or
+//   • the Vercel env var PRO_EMAILS (optional, comma-separated), handy
+//     for the owner/testers, e.g. "dalclar@gmail.com".
+// Anyone else gets a clear "no active membership" message and no token.
+// (A PRO sign-in already issued stays valid until it expires, max 30
+// days.)
+//
 // REQUIRED ENV VARS:
 //   PRO_TOKEN_SECRET — unchanged, signs the PRO JWT
 //   SUPABASE_URL, SUPABASE_SERVICE_KEY — same Supabase project
@@ -61,6 +73,31 @@ function sign(payloadB64, secret) {
   return base64url(
     crypto.createHmac("sha256", secret).update(payloadB64).digest()
   );
+}
+
+// Is this email an approved PRO member? Checks the PRO_EMAILS env var
+// first, then the nma_pro_members table. Never throws.
+export async function isApprovedPro(email) {
+  const list = String(process.env.PRO_EMAILS || "")
+    .split(",")
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+  if (list.includes(email)) return true;
+  try {
+    const { data, error } = await supabase
+      .from("nma_pro_members")
+      .select("email, active")
+      .eq("email", email)
+      .maybeSingle();
+    if (error) {
+      console.error("nma_pro_members lookup failed:", error.message || error);
+      return false;
+    }
+    return !!(data && data.active !== false);
+  } catch (e) {
+    console.error("nma_pro_members lookup threw:", e);
+    return false;
+  }
 }
 
 export default async function handler(req, res) {
@@ -126,6 +163,16 @@ export default async function handler(req, res) {
 
   // Code is correct — remove it so it can't be reused.
   await supabase.from("nma_sync_codes").delete().eq("email", cleanEmail);
+
+  // ---- 2026-10-10: only approved PRO members get a PRO sign-in ----
+  const approved = await isApprovedPro(cleanEmail);
+  if (!approved) {
+    res.status(403).json({
+      error: "This email doesn't have an active NextMoveAI PRO membership yet. If you just subscribed, give it a little time and try again, or contact us.",
+      code: "not_pro_member"
+    });
+    return;
+  }
 
   // ---- Ensure a synced user record exists ----
   const { data: userRow } = await supabase
