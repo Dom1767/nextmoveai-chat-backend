@@ -2,7 +2,20 @@
 // NextMoveAI – AI Financial Coach chat endpoint
 // Deploy this on Vercel as: api/chat.js
 //
-// UPDATED (this version):
+// UPDATED 2026-10-15 (hardening):
+// • Free limit is claimed ATOMICALLY in Supabase (claim_chat_question)
+//   BEFORE calling Anthropic, so simultaneous requests can't all slip
+//   past the check. It is refunded if the AI call fails.
+// • Second limit per network (IP from Vercel's edge header, HMAC-hashed,
+//   per day) that doesn't depend on the browser-chosen device ID. Set CHAT_IP_DAILY_LIMIT in Vercel
+//   to change it (default 30).
+// • Free requests fail CLOSED when Supabase is down (PRO unaffected).
+// • Messages are checked: only user/assistant text, size-capped.
+// • Calendar mode: real-date check, semimonthly days must be 1–31,
+//   and "today" uses America/New_York like normal chat.
+// Needs supabase-chat-limits.sql run once in Supabase.
+//
+// EARLIER:
 // 1. Verifies the PRO token sent from the frontend as `nmxProToken`
 //    (minted by /pro-access via api/issue-pro-token.js) instead of
 //    trusting any client-sent "isPro" flag.
@@ -77,6 +90,7 @@
 
 import { verifyProToken } from "./_verifyProToken.js";
 import { createClient } from "@supabase/supabase-js";
+import crypto from "node:crypto";
 
 const FREE_QUESTION_LIMIT = 4;
 
@@ -85,50 +99,88 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
-// Looks up how many free questions this device has already used.
-// Fails OPEN (allows the request) if Supabase itself has a problem —
-// a DB hiccup should never be the reason a legitimate free user gets
-// blocked, and worst case is a handful of extra free questions.
-async function getUsage(deviceId) {
-  // Missing identity must never be treated as "zero usage so far" —
-  // that's exactly the bug that let requests with no device ID
-  // sail through as accidentally-unlimited. Callers are required to
-  // reject a missing deviceId before ever calling this.
-  if (!deviceId) {
-    throw new Error("missing_device_id");
-  }
+// ---- Free-tier limits (atomic, in Supabase) ----
+// claim_chat_question() adds one to the device's count AND the
+// network's daily count in a single database step, and only if both
+// are under their limits. Returns "ok", "device_limit" or "ip_limit".
+// See supabase-chat-limits.sql. Any database error fails CLOSED.
+const IP_DAILY_LIMIT = Math.max(1, parseInt(process.env.CHAT_IP_DAILY_LIMIT || "30", 10) || 30);
 
-  const { data, error } = await supabase
-    .from("chat_usage")
-    .select("question_count")
-    .eq("device_id", deviceId)
-    .maybeSingle();
-
-  if (error) {
-    console.error("Supabase usage lookup error:", error);
-    return { count: 0 };
-  }
-
-  return { count: data ? data.question_count : 0 };
+// Client IP: Vercel sets these headers at its edge and overwrites any
+// client-sent X-Forwarded-For ("to prevent IP spoofing" — Vercel docs,
+// Request headers). x-vercel-forwarded-for is preferred because it
+// stays correct even if another proxy is ever put in front of Vercel.
+function clientIp(req) {
+  const h = (req && req.headers) || {};
+  const raw = String(h["x-vercel-forwarded-for"] || h["x-real-ip"] || h["x-forwarded-for"] || "");
+  return raw.split(",")[0].trim() || (req.socket && req.socket.remoteAddress) || "unknown";
 }
 
-async function incrementUsage(deviceId, currentCount) {
-  if (!deviceId) return;
+// Keyed hash (HMAC) so stored values can't be reversed by trying every
+// IPv4 address. Key: CHAT_IP_SALT if set in Vercel, otherwise the
+// (already secret) Supabase service key.
+function clientIpHash(req) {
+  const key = process.env.CHAT_IP_SALT || process.env.SUPABASE_SERVICE_KEY || "";
+  return crypto.createHmac("sha256", key).update(clientIp(req)).digest("hex").slice(0, 40);
+}
 
-  const { error } = await supabase
-    .from("chat_usage")
-    .upsert(
-      {
-        device_id: deviceId,
-        question_count: currentCount + 1,
-        last_seen: new Date().toISOString()
-      },
-      { onConflict: "device_id" }
-    );
-
+async function claimFreeQuestion(deviceId, ipHash) {
+  if (!deviceId) throw new Error("missing_device_id");
+  const { data, error } = await supabase.rpc("claim_chat_question", {
+    p_device_id: deviceId,
+    p_ip_hash: ipHash,
+    p_device_limit: FREE_QUESTION_LIMIT,
+    p_ip_limit: IP_DAILY_LIMIT
+  });
   if (error) {
-    console.error("Supabase usage increment error:", error);
+    console.error("Supabase claim error:", error);
+    return "error";
   }
+  return typeof data === "string" ? data : "error";
+}
+
+async function refundFreeQuestion(deviceId, ipHash) {
+  try {
+    const { error } = await supabase.rpc("refund_chat_question", {
+      p_device_id: deviceId,
+      p_ip_hash: ipHash
+    });
+    if (error) console.error("Supabase refund error:", error);
+  } catch (e) {
+    console.error("Supabase refund error:", e);
+  }
+}
+
+// ---- Message checks ----
+// Only plain user/assistant text, newest 12, each capped, total capped,
+// starting with a user message and ending with one.
+const MAX_MESSAGE_CHARS = 4000;
+const MAX_TOTAL_CHARS = 20000;
+function cleanMessages(raw) {
+  if (!Array.isArray(raw)) return [];
+  let list = raw
+    .filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string" && m.content.trim())
+    .slice(-12)
+    .map((m) => ({ role: m.role, content: m.content.slice(0, MAX_MESSAGE_CHARS) }));
+  let total = list.reduce((n, m) => n + m.content.length, 0);
+  while (list.length > 1 && total > MAX_TOTAL_CHARS) {
+    total -= list[0].content.length;
+    list.shift();
+  }
+  while (list.length && list[0].role !== "user") list.shift();
+  if (!list.length || list[list.length - 1].role !== "user") return [];
+  return list;
+}
+
+// ---- Date helpers ----
+function isRealDate(iso) {
+  if (typeof iso !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(iso)) return false;
+  const [y, m, d] = iso.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+}
+function dayOfMonth(v) {
+  return Number.isInteger(v) && v >= 1 && v <= 31 ? v : null;
 }
 
 // ============================================================
@@ -212,21 +264,24 @@ function parseCalendarIntentReply(rawText) {
       ? parsed.calendarIntent
       : {};
 
-  const dateOk =
-    typeof rawIntent.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(rawIntent.date);
+  const dateOk = isRealDate(rawIntent.date);
 
   const titleOk =
     typeof rawIntent.title === "string" && rawIntent.title.trim().length > 0;
 
-  const recognized = !!rawIntent.recognized && dateOk && titleOk;
+  const recurrenceIn = VALID_RECURRENCES.has(rawIntent.recurrence) ? rawIntent.recurrence : "none";
+  const day1 = dayOfMonth(rawIntent.semiMonthlyDay1);
+  const day2 = dayOfMonth(rawIntent.semiMonthlyDay2);
+  // Twice-a-month needs two different real days of the month.
+  const semiOk = recurrenceIn !== "semimonthly" || (day1 !== null && day2 !== null && day1 !== day2);
+
+  const recognized = !!rawIntent.recognized && dateOk && titleOk && semiOk;
 
   if (!recognized) {
     return { reply, calendarIntent: { recognized: false } };
   }
 
-  const recurrence = VALID_RECURRENCES.has(rawIntent.recurrence)
-    ? rawIntent.recurrence
-    : "none";
+  const recurrence = recurrenceIn;
 
   const category = VALID_CATEGORIES.has(rawIntent.category)
     ? rawIntent.category
@@ -239,12 +294,8 @@ function parseCalendarIntentReply(rawText) {
       title: rawIntent.title.trim().slice(0, 80),
       date: rawIntent.date,
       recurrence,
-      semiMonthlyDay1: Number.isInteger(rawIntent.semiMonthlyDay1)
-        ? rawIntent.semiMonthlyDay1
-        : null,
-      semiMonthlyDay2: Number.isInteger(rawIntent.semiMonthlyDay2)
-        ? rawIntent.semiMonthlyDay2
-        : null,
+      semiMonthlyDay1: recurrence === "semimonthly" ? Math.min(day1, day2) : null,
+      semiMonthlyDay2: recurrence === "semimonthly" ? Math.max(day1, day2) : null,
       category
     }
   };
@@ -408,6 +459,48 @@ const VETO_TOOLS = [
       },
       required: ["commitmentId", "status"]
     }
+  },
+  {
+    name: "set_goal",
+    description:
+      "Propose tracking ONE financial goal on the member's homepage. goalType: " +
+      "savings (save an amount), debt_free (pay all debt to $0), bills_on_time " +
+      "(pay every bill by its due date), or custom (any other money goal, e.g. " +
+      "raise a credit score to 700, cut spending to $2,000 a month). Use only " +
+      "after asking what that type needs (see GOALS). Saving a new goal replaces " +
+      "the current one. The member confirms before it is saved.",
+    input_schema: {
+      type: "object",
+      properties: {
+        goalType: { type: "string", enum: ["savings", "debt_free", "bills_on_time", "custom"] },
+        title: { type: "string", description: "Short name in the member's words, max 60 characters" },
+        targetDate: { type: ["string", "null"], description: "YYYY-MM-DD, or null if the member doesn't want one" },
+        targetAmount: { type: ["number", "null"], description: "savings only: goal amount in dollars" },
+        savedSoFar: { type: ["number", "null"], description: "savings only: dollars already saved toward it; 0 if none" },
+        totalDebt: { type: ["number", "null"], description: "debt_free only, and only if they have no debts in the Debt Planner: their total debt in dollars" },
+        startValue: { type: ["number", "null"], description: "custom only, if it has a number: where they are now" },
+        targetValue: { type: ["number", "null"], description: "custom only, if it has a number: where they want to be" },
+        unit: { type: ["string", "null"], enum: ["dollars", "number", null], description: "custom only: dollars for money amounts, number for anything else (like a credit score)" }
+      },
+      required: ["goalType", "title", "targetDate"]
+    }
+  },
+  {
+    name: "update_goal_progress",
+    description:
+      "Propose updating progress on the member's current goal when they tell you " +
+      "a new number. savings → savedSoFar (new TOTAL saved). debt_free typed by " +
+      "hand → debtLeft (new total debt). custom with a number → currentValue. " +
+      "Never for debt goals that use the Debt Planner or for bills_on_time. The " +
+      "member confirms before it is saved.",
+    input_schema: {
+      type: "object",
+      properties: {
+        savedSoFar: { type: ["number", "null"] },
+        debtLeft: { type: ["number", "null"] },
+        currentValue: { type: ["number", "null"] }
+      }
+    }
   }
 ];
 
@@ -553,6 +646,40 @@ function buildMemberMemoryBlock(profile) {
     }
   }
 
+  const goal = profile.activeGoal && typeof profile.activeGoal === "object" ? profile.activeGoal : null;
+  const goalTitle = goal ? cleanText(goal.title, 80) : "";
+  if (goal && goalTitle) {
+    const date = typeof goal.targetDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(goal.targetDate) ? goal.targetDate : "";
+    const when = date ? ", target date " + date : ", no target date";
+    const tag = "GOAL" + (goal.status === "paused" ? " (paused)" : "") + ": \"" + goalTitle + "\" — ";
+    const n = (v) => cleanNum(v);
+    if (goal.kind === "debt_free" && n(goal.startDebt) !== null && n(goal.currentDebt) !== null) {
+      let line = tag + "debt free: " + moneyText(goal.currentDebt) + " of debt left, started at " +
+        moneyText(goal.startDebt) + when + (goal.fromDebtPlanner ? "; balances come from the Debt Planner" : "; total typed by the member") + ".";
+      if (Array.isArray(goal.debts) && goal.debts.length) {
+        line += " Debts: " + goal.debts.slice(0, 10).map((d) => {
+          const nm = d && cleanText(d.name, 40);
+          if (!nm || n(d.balance) === null) return "";
+          return nm + " " + moneyText(d.balance) + " left" + (typeof d.nextDue === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d.nextDue) ? " (next due " + d.nextDue + ")" : "");
+        }).filter(Boolean).join("; ") + ".";
+      }
+      lines.push(line);
+    } else if (goal.kind === "bills_on_time") {
+      lines.push(tag + "pay every bill on time" + when + ". So far: " + (n(goal.onTime) || 0) + " on time, " +
+        (n(goal.late) || 0) + " late, " + (n(goal.notMarked) || 0) + " not marked paid" +
+        (goal.hasBills ? "" : "; no bills listed yet in Important Dates") +
+        (cleanText(goal.nextBill, 80) ? "; next: " + cleanText(goal.nextBill, 80) : "") + ".");
+    } else if (goal.kind === "custom") {
+      const money = goal.unit === "dollars";
+      const f = (v) => (money ? moneyText(v) : String(Math.round(v)));
+      lines.push(tag + "custom goal" + (n(goal.current) !== null && n(goal.target) !== null
+        ? ": now " + f(goal.current) + ", aiming for " + f(goal.target) + " (started at " + f(n(goal.start) ?? goal.current) + ")"
+        : " with no number to track") + when + ".");
+    } else if (n(goal.target) !== null && goal.target > 0) {
+      lines.push(tag + "savings: " + moneyText(n(goal.saved) || 0) + " saved of " + moneyText(goal.target) + when + ".");
+    }
+  }
+
   if (Array.isArray(profile.recentOutcomes) && profile.recentOutcomes.length) {
     const kinds = profile.recentOutcomes
       .map((o) => (o && typeof o === "object" ? cleanText(o.kind, 40) : ""))
@@ -580,6 +707,8 @@ function fallbackReplyForActions(actions) {
   if (type === "record_checkin") return "Got it. Tap Save to record your check-in.";
   if (type === "add_important_date") return "I can add that to your Important Dates. Tap Save if it looks right.";
   if (type === "save_next_move") return "Want to save this as your focus? Tap Save below.";
+  if (type === "set_goal") return "Here's your goal plan. Tap Save to track it on your homepage.";
+  if (type === "update_goal_progress") return "Nice progress. Tap Save to update your goal.";
   return "Tap Save below if that looks right.";
 }
 
@@ -605,6 +734,11 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Server not configured" });
   }
 
+  // Set once a free question is claimed; refunded if the request fails.
+  let claimed = false;
+  let claimDeviceId = null;
+  const ipHash = clientIpHash(req);
+
   try {
 
     const { messages } = req.body || {};
@@ -613,7 +747,10 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "messages array required" });
     }
 
-    const trimmed = messages.slice(-12);
+    const trimmed = cleanMessages(messages);
+    if (!trimmed.length) {
+      return res.status(400).json({ error: "invalid_messages" });
+    }
 
     // Real, server-verified PRO status — replaces trusting any
     // client-sent flag. proEmail is the verified member's email if
@@ -634,7 +771,6 @@ export default async function handler(req, res) {
         ? req.body.nmxDeviceId.slice(0, 100)
         : null;
 
-    let usage = { count: 0 };
 
     if (!isPro) {
       // Missing identity must fail closed, not open — a request
@@ -649,13 +785,21 @@ export default async function handler(req, res) {
         });
       }
 
-      usage = await getUsage(deviceId);
-      if (usage.count >= FREE_QUESTION_LIMIT) {
+      const claim = await claimFreeQuestion(deviceId, ipHash);
+      if (claim === "device_limit" || claim === "ip_limit") {
         return res.status(403).json({
           error: "free_limit_reached",
           message: "You've used your free questions. Upgrade to Veto PRO for unlimited access."
         });
       }
+      if (claim !== "ok") {
+        return res.status(503).json({
+          error: "temporarily_unavailable",
+          message: "Veto is busy right now. Please try again in a minute."
+        });
+      }
+      claimed = true;
+      claimDeviceId = deviceId;
     }
 
     // Optional: "Hey Veto" voice commands send intentMode: "calendar"
@@ -903,8 +1047,9 @@ export default async function handler(req, res) {
 
     if (isCalendarIntent) {
       const now = new Date();
-      const todayIso = now.toISOString().slice(0, 10);
+      const todayIso = now.toLocaleDateString("en-CA", { timeZone: "America/New_York" });
       const todayLabel = now.toLocaleDateString("en-US", {
+        timeZone: "America/New_York",
         weekday: "long",
         year: "numeric",
         month: "long",
@@ -981,7 +1126,9 @@ export default async function handler(req, res) {
         "new, say briefly that besides answering money questions you " +
         "can add bills, paydays, appointments and deadlines to " +
         "[Important Dates](/important-dates), help them pick and save " +
-        "their next money move, set a small weekly step, and point them " +
+        "their next money move, set a small weekly step, set up a " +
+        "financial goal they can track on their homepage (saving, " +
+        "becoming debt free, paying bills on time, or their own), and point them " +
         "to the right tool. Reminder emails are sent by Important Dates " +
         "when the person has synced their email there; never say that " +
         "you personally will remind them or that you watch their " +
@@ -992,13 +1139,15 @@ export default async function handler(req, res) {
         "with ONE short line offering that tool as a link (for example " +
         "the [Debt Planner](/debt-plan) for a payoff question). Not in " +
         "every reply, only when it clearly fits." +
-        "\n\nACTIONS: four tools are available to you — " +
+        "\n\nACTIONS: six tools are available to you — " +
         "add_important_date (for a bill, payday, renewal, or other " +
         "date-based reminder the person mentions), save_next_move " +
         "(when the person confirms or agrees with the priority you " +
         "just recommended, to save it as their focus), " +
         "create_commitment (a concrete weekly step), and " +
-        "record_checkin (their answer about an active weekly step). " +
+        "record_checkin (their answer about an active weekly step), " +
+        "set_goal (track one financial goal), and " +
+        "update_goal_progress (a new number for that goal). " +
         "When one clearly applies, propose the tool call instead of " +
         "only describing the action in text. Never call a tool for " +
         "something the person hasn't actually mentioned or confirmed " +
@@ -1029,7 +1178,48 @@ export default async function handler(req, res) {
         "offer to keep the same step or pick a smaller one. Never " +
         "shame or guilt them.\n" +
         "- Everything about weekly steps is self-reported; you have no " +
-        "bank data and cannot move money.";
+        "bank data and cannot move money." +
+        "\n\nGOALS (My Financial Goals on the homepage, one active goal):\n" +
+        "- When someone says what they want to accomplish with money, work " +
+        "out which type it is: savings, debt_free, bills_on_time, or custom. " +
+        "If it isn't clear, ask in one short question.\n" +
+        "- Ask only what that type still needs, in ONE short message:\n" +
+        "  savings: how much they've already saved toward it and their target date.\n" +
+        "  debt_free: their target date, if any. Debts they've listed in the " +
+        "[Debt Planner](/debt-plan) are connected automatically (each debt's " +
+        "progress and due dates show on the goal card), so don't ask them to " +
+        "list debts again. If MEMBER MEMORY shows no debt numbers, ask whether " +
+        "their debts are in the Debt Planner; if not, ask for a rough total " +
+        "(totalDebt) and mention that adding them to the Debt Planner tracks " +
+        "each debt and its due dates.\n" +
+        "  bills_on_time: how long they want to keep it up (target date). Bills " +
+        "come from [Important Dates](/important-dates) and Debt Planner due " +
+        "days; they tap ✓ Paid when the greeting shows a bill due.\n" +
+        "  custom: what number shows progress, where they are now and where " +
+        "they want to be, plus a target date. If there's no number, that's " +
+        "fine: track it with a target date and a check-in.\n" +
+        "- Then give the plan in one or two sentences. For savings and " +
+        "debt_free with a date, give the weekly amount: amount left ÷ weeks " +
+        "until the date, rounded up (for debt, say it's before interest and " +
+        "point to the Debt Planner for an exact payoff date). If the weekly " +
+        "amount looks like more than they can spare from the numbers you " +
+        "have, say so kindly and offer a later date. Then propose set_goal.\n" +
+        "- One active goal at a time. If MEMBER MEMORY shows a GOAL, say that " +
+        "saving the new one replaces it. (Several goals at once may come " +
+        "later with PRO; don't promise it.)\n" +
+        "- When they tell you a new number, propose update_goal_progress " +
+        "(savings: new TOTAL saved; typed debt: new total left; custom: new " +
+        "value). Debt Planner goals update when they change balances in the " +
+        "Debt Planner; bills update when they tap ✓ Paid.\n" +
+        "- Savings, debt-free and number goals complete on their own when " +
+        "the numbers reach the target; never tell them a goal is reached " +
+        "before that. Bill goals complete on their own after their goal " +
+        "date if every bill was paid on time. Only custom goals without a " +
+        "number are marked complete by the member.\n" +
+        "- Goal reminders are check-ins on the homepage and in your greeting. " +
+        "Never say you will email or text them about a goal.\n" +
+        "- Progress is self-reported. Celebrate milestones in one " +
+        "sentence; never shame a slow week.";
     }
 
     const fullSystemPrompt =
@@ -1059,6 +1249,7 @@ export default async function handler(req, res) {
     });
 
     if (!response.ok) {
+      if (claimed) { claimed = false; await refundFreeQuestion(deviceId, ipHash); }
       const errText = await response.text();
       console.error("Anthropic API error:", response.status, errText.slice(0, 500));
       return res.status(502).json({ error: "AI service error" });
@@ -1069,11 +1260,9 @@ export default async function handler(req, res) {
     // Pulls out the reply text plus any proposed tool_use blocks.
     const { reply, actions } = extractProposedActions(data);
 
-    // Only count this toward the free limit on a successful reply —
-    // a failed Anthropic call shouldn't cost the person a question.
-    if (!isPro) {
-      await incrementUsage(deviceId, usage.count);
-    }
+    // The question was claimed up front; a failed Anthropic call
+    // refunds it above, so a failure never costs the person a question.
+    claimed = false;
 
     if (isCalendarIntent) {
       const { reply: parsedReply, calendarIntent } = parseCalendarIntentReply(reply);
@@ -1098,6 +1287,7 @@ export default async function handler(req, res) {
     // Log the error only — never the request body, which can hold
     // member financial details when Veto memory is on.
     console.error("Chat handler error:", err && err.message ? err.message : err);
+    if (claimed) await refundFreeQuestion(claimDeviceId, ipHash);
     return res.status(500).json({ error: "Something went wrong" });
   }
 }
