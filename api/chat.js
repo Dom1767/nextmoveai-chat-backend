@@ -2,6 +2,9 @@
 // NextMoveAI – AI Financial Coach chat endpoint
 // Deploy this on Vercel as: api/chat.js
 //
+// UPDATED 2026-10-15 (Veto Academy): Veto can recommend one live lesson
+//   when someone is unsure of a basic idea. Live lessons are listed in
+//   VETO_ACADEMY_LESSONS below; add new ones there when they publish.
 // UPDATED 2026-10-15 (hardening):
 // • Free limit is claimed ATOMICALLY in Supabase (claim_chat_question)
 //   BEFORE calling Anthropic, so simultaneous requests can't all slip
@@ -93,6 +96,16 @@ import { createClient } from "@supabase/supabase-js";
 import crypto from "node:crypto";
 
 const FREE_QUESTION_LIMIT = 4;
+
+// Veto Academy lessons that are LIVE. When a new lesson is published,
+// add it here and Veto will start recommending it. [title, url, when it helps]
+const VETO_ACADEMY_LESSONS = [
+  ["Know Your Starting Point", "/learn-starting-point", "unsure what their numbers mean, what take-home pay is, or what the Financial Health Score means"],
+  ["See Where Your Money Goes", "/learn-where-money-goes", "unsure where their money goes, or asking about essentials vs flexible spending"],
+  ["Find Your Money Leaks", "/learn-money-leaks", "asking about subscriptions, bank fees, small recurring costs, or freeing up money"],
+  ["Give Your Paycheck a Plan", "/learn-paycheck-plan", "asking how to budget a paycheck, about 50/30/20, or paying yourself first"],
+  ["Never Miss a Bill or Payday", "/learn-bills-paydays", "dealing with late payments, bills due before payday, or the tight stretch between checks"]
+];
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -852,6 +865,13 @@ export default async function handler(req, res) {
       "week against your budget.\n" +
       "- My Net Worth (/net-worth) – what you own minus what you owe, " +
       "tracked over time.\n" +
+      "- Money Leaks (/money-leaks) – finds money quietly slipping away " +
+      "each month, like forgotten subscriptions and fees.\n" +
+      "- Next Dollar (/next-dollar) – compares putting the next dollar " +
+      "toward debt, savings or investing.\n" +
+      "- Veto Academy (/learn) – free 3-minute money lessons, each with " +
+      "an example and one next step. Live lessons:\n" +
+      VETO_ACADEMY_LESSONS.map((l, i) => "  " + (i + 1) + ". [" + l[0] + "](" + l[1] + ") – helps when someone is " + l[2] + ".\n").join("") +
       "\n" +
       "GUIDANCE FOR DIRECTING PEOPLE — MANDATORY LINKING RULE: " +
       "whenever you reference ANY page from this site map by name, " +
@@ -865,7 +885,19 @@ export default async function handler(req, res) {
       "mentioned checking their Financial Health Score yet and seem " +
       "new, it's often the natural first step to suggest. Don't " +
       "list multiple pages unless asked – recommend the single most " +
-      "relevant one for what they asked, but still link it.";
+      "relevant one for what they asked, but still link it." +
+      "\n\nVETO ACADEMY: when someone seems unsure of a basic idea " +
+      "(they ask what a term means, say they don't know where to start, " +
+      "or feel overwhelmed), answer their question first, then you may " +
+      "add ONE short line recommending the single most relevant live " +
+      "lesson above as a link, e.g. \"Want the 3-minute version? Try " +
+      "[Give Your Paycheck a Plan](/learn-paycheck-plan) in Veto " +
+      "Academy.\" Only recommend lessons listed above. For topics " +
+      "without a live lesson yet (emergency funds, debt payoff, " +
+      "investing, buying a home), point to the matching tool instead. " +
+      "Don't add a lesson to every reply, and skip it when they clearly " +
+      "already understand the topic. A lesson recommendation counts as " +
+      "your one tool line for that reply.";
 
     // Which persona name to use – each page on the site sends its
     // own name (Veto on the homepage and free preview, Veto on the
@@ -1128,7 +1160,8 @@ export default async function handler(req, res) {
         "[Important Dates](/important-dates), help them pick and save " +
         "their next money move, set a small weekly step, set up a " +
         "financial goal they can track on their homepage (saving, " +
-        "becoming debt free, paying bills on time, or their own), and point them " +
+        "becoming debt free, paying bills on time, or their own), recommend " +
+        "a short lesson in [Veto Academy](/learn), and point them " +
         "to the right tool. Reminder emails are sent by Important Dates " +
         "when the person has synced their email there; never say that " +
         "you personally will remind them or that you watch their " +
