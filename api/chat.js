@@ -104,7 +104,12 @@ const VETO_ACADEMY_LESSONS = [
   ["See Where Your Money Goes", "/learn-where-money-goes", "unsure where their money goes, or asking about essentials vs flexible spending"],
   ["Find Your Money Leaks", "/learn-money-leaks", "asking about subscriptions, bank fees, small recurring costs, or freeing up money"],
   ["Give Your Paycheck a Plan", "/learn-paycheck-plan", "asking how to budget a paycheck, about 50/30/20, or paying yourself first"],
-  ["Never Miss a Bill or Payday", "/learn-bills-paydays", "dealing with late payments, bills due before payday, or the tight stretch between checks"]
+  ["Never Miss a Bill or Payday", "/learn-bills-paydays", "dealing with late payments, bills due before payday, or the tight stretch between checks"],
+  ["Build Your First Cushion", "/learn-emergency-fund", "asking about emergency funds, how much to save first, or where to keep savings"],
+  ["Make a Debt Payoff Plan", "/learn-debt-payoff", "asking how interest works, why minimum payments take so long, or avalanche vs snowball"],
+  ["Decide Where Your Next Dollar Goes", "/learn-next-dollar", "unsure whether to pay off debt, save or invest first"],
+  ["Investing Basics", "/learn-investing-basics", "new to investing, or asking about risk, time, diversification or fees"],
+  ["Big Goals, Like a Home", "/learn-home-goals", "thinking about buying a home or another big purchase, or asking what they can afford"]
 ];
 
 const supabase = createClient(
@@ -892,9 +897,7 @@ export default async function handler(req, res) {
       "add ONE short line recommending the single most relevant live " +
       "lesson above as a link, e.g. \"Want the 3-minute version? Try " +
       "[Give Your Paycheck a Plan](/learn-paycheck-plan) in Veto " +
-      "Academy.\" Only recommend lessons listed above. For topics " +
-      "without a live lesson yet (emergency funds, debt payoff, " +
-      "investing, buying a home), point to the matching tool instead. " +
+      "Academy.\" Only recommend lessons listed above. " +
       "Don't add a lesson to every reply, and skip it when they clearly " +
       "already understand the topic. A lesson recommendation counts as " +
       "your one tool line for that reply.";
