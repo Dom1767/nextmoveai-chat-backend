@@ -49,6 +49,18 @@
 //    never proves PRO status by itself; it's free-tier tracking
 //    only, gated entirely behind "not already PRO."
 //
+// UPDATED 2026-10-20 (faster hero greeting):
+// 5. The homepage greeting can now ask for audio with a plain GET
+//    (?t=<text>), which lets the browser start playing while the
+//    audio is still being created instead of waiting for the whole
+//    file. GET is ONLY the hero greeting: same 500-character cap,
+//    no PRO check, no usage counter. Everything else stays POST.
+// 6. Audio is passed through to the browser as OpenAI sends it
+//    (streamed) instead of being collected into one buffer first.
+//    If streaming isn't available it falls back to the old way.
+// Note: GET puts the greeting text (which can include the visitor's
+// first name) in the URL, so it can show up in Vercel's request logs.
+//
 // Requires (in addition to OPENAI_API_KEY, already set):
 //   SUPABASE_URL, SUPABASE_SERVICE_KEY — already set in this project
 //   PRO_TOKEN_SECRET — already set, used by _verifyProToken
@@ -58,6 +70,7 @@
 
 import { verifyProToken } from "./_verifyProToken.js";
 import { createClient } from "@supabase/supabase-js";
+import { Readable } from "node:stream";
 
 const FREE_TTS_LIMIT = 1;
 const MAX_GREETING_LENGTH = 500;
@@ -125,18 +138,20 @@ function applyPronunciationNudge(text) {
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") {
     res.status(200).end();
     return;
   }
-  if (req.method !== "POST") {
+  const isGet = req.method === "GET";
+  if (req.method !== "POST" && !isGet) {
     res.status(405).json({ error: "Method not allowed." });
     return;
   }
   try {
-    const { text } = req.body || {};
+    const body = isGet ? {} : (req.body || {});
+    const text = isGet ? (req.query && typeof req.query.t === "string" ? req.query.t : "") : body.text;
     if (!text || typeof text !== "string" || !text.trim()) {
       res.status(400).json({ error: "No text provided." });
       return;
@@ -148,7 +163,8 @@ export default async function handler(req, res) {
     // this can't double as a way to get unlimited free generation
     // of arbitrary text by spoofing the flag directly against the
     // API from outside the site.
-    const isHeroGreeting = req.body && req.body.isHeroGreeting === true;
+    // A GET request is always the hero greeting (see note 5 above).
+    const isHeroGreeting = isGet || body.isHeroGreeting === true;
 
     if (isHeroGreeting && safeText.length > MAX_GREETING_LENGTH) {
       res.status(400).json({ error: "Greeting text is too long for the free preview." });
@@ -158,12 +174,12 @@ export default async function handler(req, res) {
     // Real, server-verified PRO status — the actual entitlement
     // check. Device ID (below) is free-tier usage tracking only
     // and never substitutes for a valid PRO token.
-    const proEmail = verifyProToken(req.body.nmxProToken);
+    const proEmail = isHeroGreeting ? null : verifyProToken(body.nmxProToken);
     const isPro = !!proEmail;
 
     const deviceId =
-      typeof req.body.nmxDeviceId === "string"
-        ? req.body.nmxDeviceId.slice(0, 100)
+      typeof body.nmxDeviceId === "string"
+        ? body.nmxDeviceId.slice(0, 100)
         : null;
 
     let usage = { count: 0 };
@@ -226,10 +242,23 @@ export default async function handler(req, res) {
       await incrementUsage(deviceId, usage.count);
     }
 
-    const audioBuffer = await openaiResponse.arrayBuffer();
     res.setHeader("Content-Type", "audio/mpeg");
     res.setHeader("Cache-Control", "no-store");
-    res.status(200).send(Buffer.from(audioBuffer));
+    res.statusCode = 200;
+
+    // Stream the audio through as it arrives so playback can start early.
+    if (openaiResponse.body && typeof Readable.fromWeb === "function") {
+      const stream = Readable.fromWeb(openaiResponse.body);
+      stream.on("error", function (err) {
+        console.error("TTS stream error:", err);
+        res.end();
+      });
+      stream.pipe(res);
+      return;
+    }
+
+    const audioBuffer = await openaiResponse.arrayBuffer();
+    res.end(Buffer.from(audioBuffer));
   } catch (error) {
     console.error("TTS route error:", error);
     res.status(500).json({ error: "Something went wrong generating audio." });
