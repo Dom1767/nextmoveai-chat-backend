@@ -13,7 +13,7 @@
 //   <a href="/pro-access" class="nmx-membership-status is-login"
 //      id="nmxMembershipStatus" aria-label="Member login — log in or reconnect membership">
 //     <span class="nmx-membership-dot" aria-hidden="true"></span>
-//     <span id="nmxMembershipStatusText">Member Login</span>
+//     <span id="nmxMembershipStatusText">PRO Login</span>
 //   </a>
 //
 // This script auto-detects those two ids on load. If a page doesn't
@@ -22,7 +22,7 @@
 // without needing per-page opt-in logic.
 //
 // Behavior (identical everywhere, matching the homepage exactly):
-//   - "Member Login" + href="/pro-access" when no local PRO token is found
+//   - "PRO Login" + href="/pro-access" when no local PRO token is found
 //   - "✓ Membership Verified" (shortened to "✓ Verified" under
 //     600px via the .nmx-membership-long CSS class) + href="/ai-coach"
 //     when one is found
@@ -32,6 +32,11 @@
 // so this is a re-login, not a payment) and confirms the token with
 // /api/verify-pro once per tab session (cached 10 minutes). Chat and
 // voice still enforce PRO on the server as before.
+//
+// UPDATED 2026-10-31 (b): the badge says what it is for. "Member Login"
+// is now "PRO Login" and "Sign in again" is now "Reconnect PRO", so free
+// visitors can see they don't need it (every free tool works without it).
+// Also: if this file is loaded twice on a page, the second copy does nothing.
 //
 // UPDATED 2026-10-31: tapping "Sign in again" or "Member Login" first
 // shows a short note: existing members should choose Log in on the next
@@ -49,6 +54,7 @@
 
 (function () {
   "use strict";
+  if (window.NextMoveMembershipUI) { return; }
 
   var TOKEN_KEYS = ["nmx_pro_token", "nmxProToken"];
 
@@ -133,17 +139,17 @@
     } else if (isExpired()) {
       status.classList.remove("is-verified");
       status.classList.add("is-login");
-      textEl.textContent = "Sign in again";
+      textEl.textContent = "Reconnect PRO";
       status.href = "/pro-access";
-      status.setAttribute("aria-label", "Your PRO sign-in on this browser has expired. Sign in again to reconnect. No new payment needed.");
-      status.title = "Your PRO sign-in on this browser lasts 30 days. Sign in again to reconnect. No new payment needed.";
+      status.setAttribute("aria-label", "Your PRO sign-in on this browser has expired. Reconnect PRO. No new payment needed.");
+      status.title = "Your PRO sign-in on this browser lasts 30 days. Tap to reconnect. No new payment needed.";
     } else {
       status.classList.remove("is-verified");
       status.classList.add("is-login");
-      textEl.textContent = "Member Login";
+      textEl.textContent = "PRO Login";
       status.href = "/pro-access";
-      status.setAttribute("aria-label", "Member login — log in or reconnect membership");
-      status.title = "Log in or reconnect your membership";
+      status.setAttribute("aria-label", "PRO login, for Veto PRO members. Free tools don't need a login.");
+      status.title = "For Veto PRO members. Free tools don't need a login.";
     }
     verifyWithServer();
   }
@@ -156,8 +162,8 @@
     wrap.style.cssText = "position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(4,14,24,.62);font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
     wrap.innerHTML =
       '<div role="dialog" aria-modal="true" aria-labelledby="nmxMemberHelpTitle" style="max-width:420px;width:100%;padding:24px 22px;border-radius:20px;background:#0c2c44;border:1px solid rgba(36,224,199,.3);color:#fff;box-shadow:0 24px 60px rgba(0,0,0,.35)">' +
-      '<h2 id="nmxMemberHelpTitle" style="margin:0 0 8px;font-size:20px;font-weight:900;line-height:1.2;color:#fff">' + (expired ? "Your PRO sign-in on this browser expired" : "Member login") + '</h2>' +
-      '<p style="margin:0 0 12px;color:rgba(255,255,255,.78);font-size:14px;line-height:1.5;font-weight:600">' + (expired ? "If your PRO membership is active, you don't need to pay again. Sign-ins on each browser just reconnect every 30 days." : "Already a PRO member? Here's how to connect this browser.") + '</p>' +
+      '<h2 id="nmxMemberHelpTitle" style="margin:0 0 8px;font-size:20px;font-weight:900;line-height:1.2;color:#fff">' + (expired ? "Reconnect PRO on this browser" : "PRO login") + '</h2>' +
+      '<p style="margin:0 0 12px;color:rgba(255,255,255,.78);font-size:14px;line-height:1.5;font-weight:600">' + (expired ? "If your PRO membership is active, you don't need to pay again. Sign-ins on each browser just reconnect every 30 days." : "This login is only for Veto PRO members. All free tools work without it. Already a PRO member? Here's how to connect this browser.") + '</p>' +
       '<ol style="margin:0 0 16px;padding-left:20px;color:#e9fffb;font-size:14px;line-height:1.55;font-weight:650">' +
       '<li>On the next page, choose <b>Log in</b>, not Sign up.</li>' +
       '<li>Log in with the email you used for PRO.</li>' +
