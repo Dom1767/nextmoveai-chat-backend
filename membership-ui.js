@@ -33,6 +33,11 @@
 // /api/verify-pro once per tab session (cached 10 minutes). Chat and
 // voice still enforce PRO on the server as before.
 //
+// UPDATED 2026-10-31: tapping "Sign in again" or "Member Login" first
+// shows a short note: existing members should choose Log in on the next
+// page (Squarespace shows the $9.99 sign-up to anyone not logged in) and
+// must not sign up again. Then "Continue" goes to /pro-access as before.
+//
 // Re-renders on:
 //   - "storage" (verification completed in another tab of this browser)
 //   - "pageshow" (returning via back/forward cache)
@@ -143,8 +148,42 @@
     verifyWithServer();
   }
 
+  /* 2026-10-31 — explain the member login before Squarespace's paywall page */
+  function helpBox(expired) {
+    var old = document.getElementById("nmxMemberHelp"); if (old) { old.remove(); }
+    var wrap = document.createElement("div");
+    wrap.id = "nmxMemberHelp";
+    wrap.style.cssText = "position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(4,14,24,.62);font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
+    wrap.innerHTML =
+      '<div role="dialog" aria-modal="true" aria-labelledby="nmxMemberHelpTitle" style="max-width:420px;width:100%;padding:24px 22px;border-radius:20px;background:#0c2c44;border:1px solid rgba(36,224,199,.3);color:#fff;box-shadow:0 24px 60px rgba(0,0,0,.35)">' +
+      '<h2 id="nmxMemberHelpTitle" style="margin:0 0 8px;font-size:20px;font-weight:900;line-height:1.2;color:#fff">' + (expired ? "Your PRO sign-in on this browser expired" : "Member login") + '</h2>' +
+      '<p style="margin:0 0 12px;color:rgba(255,255,255,.78);font-size:14px;line-height:1.5;font-weight:600">' + (expired ? "If your PRO membership is active, you don't need to pay again. Sign-ins on each browser just reconnect every 30 days." : "Already a PRO member? Here's how to connect this browser.") + '</p>' +
+      '<ol style="margin:0 0 16px;padding-left:20px;color:#e9fffb;font-size:14px;line-height:1.55;font-weight:650">' +
+      '<li>On the next page, choose <b>Log in</b>, not Sign up.</li>' +
+      '<li>Log in with the email you used for PRO.</li>' +
+      '<li>Tap <b>Activate PRO</b>.</li></ol>' +
+      '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+      '<a href="/pro-access" style="flex:1;min-width:150px;padding:12px 14px;border-radius:12px;background:linear-gradient(135deg,#35ead4,#15c8b4);color:#061a2b;font-weight:900;text-align:center;text-decoration:none">Continue →</a>' +
+      '<button type="button" data-close style="padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.3);background:none;color:#fff;font:inherit;font-weight:800;cursor:pointer">Not now</button></div></div>';
+    function close() { wrap.remove(); document.removeEventListener("keydown", onKey); }
+    function onKey(e) { if (e.key === "Escape") { close(); } }
+    wrap.addEventListener("click", function (e) { if (e.target === wrap || (e.target.closest && e.target.closest("[data-close]"))) { close(); } });
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(wrap);
+    var c = wrap.querySelector("a"); if (c) { try { c.focus(); } catch (e) {} }
+  }
+
   function init() {
     renderMembership();
+
+    document.addEventListener("click", function (e) {
+      var a = e.target.closest && e.target.closest("#nmxMembershipStatus");
+      if (!a || isProMember()) { return; }
+      if (e.metaKey || e.ctrlKey || e.shiftKey) { return; }
+      if (window.location.pathname === "/pro-access") { return; }
+      e.preventDefault();
+      helpBox(isExpired());
+    });
 
     window.addEventListener("storage", function (e) {
       if (e.key === "nmx_pro_token" || e.key === "nmxProToken") {
